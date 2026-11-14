@@ -281,3 +281,49 @@ test('providers: presets, old settings, and request shapes', () => {
   assert.throws(() => Providers.chatRequest({ provider: 'custom', baseUrl: 'http://example.com', modelId: 'm' }, '', 's', 'u'));
   assert.match(Providers.explain(401, { error: { message: 'bad key' } }), /密钥.*bad key/);
 });
+
+test('inside a space the app decides where new items go, including goals and their tasks', () => {
+  const s = C.emptyState();
+  const { actions } = C.validateActions(s, [
+    { type: 'add_goal', title: '减重', space: '不存在的分区', spaceId: 'space_3', milestones: [{ title: '第 1 个月', tasks: [{ title: '快走 45 分钟', space: '学习' }] }] },
+    { type: 'add_habit', title: '称体重', perWeek: 1, spaceId: 'space_3' },
+    { type: 'add_task', title: '买运动鞋', space: '生活' },
+    { type: 'add_task', title: '无分区', space: '乱写' },
+  ]);
+  assert.equal(actions[0].spaceId, 'space_3');
+  assert.equal(actions[0].milestones[0].tasks[0].spaceId, 'space_3');
+  assert.equal(actions[0].deadline, null);
+  assert.equal(actions[1].spaceId, 'space_3');
+  assert.equal(actions[2].spaceId, 'space_4');
+  assert.equal(actions[3].spaceId, null);
+});
+
+test('each space has its own conversation history', () => {
+  const s = C.emptyState();
+  s.messages.push({ id: 'a', role: 'user', text: 'general', at: 1 }, { id: 'b', role: 'user', text: 'health', at: 2, spaceId: 'space_3' });
+  assert.deepEqual(C.buildContext(s, TODAY, 'x', 'space_3').history.map((m) => m.text), ['health']);
+  assert.deepEqual(C.buildContext(s, TODAY, 'x', null).history.map((m) => m.text), ['general']);
+  assert.equal(C.buildContext(s, TODAY, 'x').history.length, 2);
+});
+
+test('spaces have a type; older data gets sensible types', () => {
+  assert.deepEqual(C.emptyState().spaces.map((x) => x.type), ['study', 'project', 'habit', 'life']);
+  const old = C.normalize({ spaces: [{ id: 'space_3', name: '习惯与健康', color: '#000' }, { id: 'space_x', name: '微机原理', color: '#000' }, { id: 'space_y', name: 'y', color: '#000', type: 'bogus' }] });
+  assert.deepEqual(old.spaces.map((x) => x.type), ['habit', 'study', 'study']);
+});
+
+test('a measurement keeps one value per day and reports first and latest to the model', () => {
+  let s = withProposal(C.emptyState(), [
+    { type: 'log_metric', name: '体重', value: '72.456', unit: 'kg', date: '2026-11-01', spaceId: 'space_3' },
+    { type: 'log_metric', name: '体重', value: 71.800, date: '2026-11-14', spaceId: 'space_3' },
+    { type: 'log_metric', name: '体重', value: 'abc' },
+  ]);
+  assert.equal(s.messages[0].proposal.actions.length, 2, 'a non-number is rejected');
+  s = C.resolveProposal(s, 'm1', true, new Date(TODAY + 'T08:00:00').getTime());
+  assert.equal(s.metrics.length, 1);
+  assert.deepEqual(s.metrics[0].entries, [{ date: '2026-11-01', value: 72.46 }, { date: '2026-11-14', value: 71.800 }]);
+  C.logMetric(s, { name: '体重', value: 71.500, spaceId: 'space_3', date: '2026-11-14' }, 0);
+  assert.equal(s.metrics[0].entries.length, 2, 'same day replaces');
+  const ctx = C.buildContext(s, TODAY, 'x');
+  assert.deepEqual(ctx.metrics, [{ name: '体重', unit: 'kg', space: '习惯与健康', count: 2, first: { date: '2026-11-01', value: 72.46 }, latest: { date: '2026-11-14', value: 71.500 } }]);
+});

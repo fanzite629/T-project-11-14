@@ -7,17 +7,13 @@
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<header class="topbar">
-  <div class="brand"><span class="brand-mark" aria-hidden="true">T</span><span class="brand-name">T计划</span></div>
-  <nav class="top-nav" aria-label="主导航">
-    <button class="pill" data-view="chat">聊天</button>
-    <button class="pill" data-view="review">回看</button>
-  </nav>
-  <button class="icon-btn" id="openSettings" aria-label="设置" title="设置"></button>
-</header>
-
 <main class="shell" id="shell">
-  <aside class="rail" id="rail" aria-label="分区"></aside>
+  <div class="rail-col">
+    <aside class="rail" id="rail" aria-label="分区"></aside>
+    <button class="brand-btn" id="openSettings" aria-label="T计划：打开设置和回看" title="设置和回看">
+      <span class="brand-mark" aria-hidden="true">T</span><span class="brand-name">T计划</span>
+    </button>
+  </div>
   <div class="list-col">
     <section class="list" id="list" aria-label="任务"></section>
     <aside class="dock" id="dock" aria-label="计时" hidden></aside>
@@ -26,6 +22,7 @@
   <section class="main" id="main"></section>
 </main>
 
+<dialog class="panel" id="panel" aria-label="设置"></dialog>
 <dialog class="sheet" id="dialog"></dialog>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
