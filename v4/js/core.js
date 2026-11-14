@@ -45,12 +45,13 @@
       habits: [],
       goals: [],
       sessions: [],
+      reflections: [],
       messages: [],
       memory: [],
       timer: null,
       settings: {
-        agent: { provider: 'openai', baseUrl: '', modelId: '' },
-        prefs: { segment: 25, dailyMinutes: null, bestTime: null, onboarded: false },
+        agent: { provider: 'deepseek', baseUrl: 'https://api.deepseek.com', modelId: '', models: [], vision: null },
+        prefs: { segment: 25, dailyMinutes: null, bestTime: null, onboarded: false, timerCompact: false },
       },
     };
   }
@@ -61,7 +62,7 @@
     if ((raw.version || 0) > VERSION) throw new Error('这是更新版本的数据，请使用新版软件打开');
     const base = emptyState();
     const s = { ...base, ...raw, version: VERSION };
-    for (const key of ['spaces', 'tasks', 'habits', 'goals', 'sessions', 'messages', 'memory']) if (!Array.isArray(s[key])) s[key] = base[key];
+    for (const key of ['spaces', 'tasks', 'habits', 'goals', 'sessions', 'reflections', 'messages', 'memory']) if (!Array.isArray(s[key])) s[key] = base[key];
     s.settings = { ...base.settings, ...(isObject(raw.settings) ? raw.settings : {}) };
     s.settings.agent = { ...base.settings.agent, ...(isObject(s.settings.agent) ? s.settings.agent : {}) };
     s.settings.prefs = { ...base.settings.prefs, ...(isObject(s.settings.prefs) ? s.settings.prefs : {}) };
@@ -186,6 +187,12 @@
         if (!milestones.length) throw new Error('目标至少需要一个阶段');
         return { type: 'add_goal', title, deadline: validDate(a.deadline) ? a.deadline : null, spaceId, milestones };
       }
+      case 'add_reflection': {
+        // Line breaks are kept: a reflection is the user's own writing, often transcribed from a photo.
+        const text = typeof a.text === 'string' ? a.text.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 4000) : '';
+        if (!text) throw new Error('反思内容为空');
+        return { type: 'add_reflection', text, date: validDate(a.date) ? a.date : null };
+      }
       case 'remember': {
         const text = cleanText(a.text, 300);
         if (!text) throw new Error('记忆内容为空');
@@ -226,6 +233,8 @@
         s.tasks.push(task);
         created.push(task.id);
       }));
+    } else if (a.type === 'add_reflection') {
+      s.reflections.push({ id: uid('r'), date: a.date || todayISO(new Date(now)), text: a.text, at: now, source: origin });
     } else if (a.type === 'remember') {
       addMemory(s, a.text, now, origin);
     }
@@ -255,6 +264,43 @@
     p.status = 'accepted';
     p.resolvedAt = now;
     p.created = created;
+    return s;
+  }
+
+  /* Lets the user adjust the steps of a proposed task before confirming it. Returns a new state. */
+  function editProposal(state, messageId, actionIndex, op) {
+    const s = clone(state);
+    const message = s.messages.find((m) => m.id === messageId);
+    if (!message || !message.proposal || message.proposal.status !== 'pending') throw new Error('这份提议已经处理过了');
+    const a = message.proposal.actions[actionIndex];
+    if (a && a.type === 'add_reflection' && op.kind === 'text') {
+      const text = String(op.text || '').trim().slice(0, 4000);
+      if (!text) throw new Error('反思内容不能为空');
+      a.text = text;
+      message.proposal.edited = true;
+      return s;
+    }
+    if (!a || a.type !== 'add_task') throw new Error('这一项不能修改');
+    if (!a.steps) a.steps = [{ title: a.title, minutes: Math.min(180, a.minutes) }];
+    const step = a.steps[op.step];
+    if (op.kind !== 'add' && !step) throw new Error('这一步已经不存在');
+    if (op.kind === 'minutes') step.minutes = Math.min(180, Math.max(5, step.minutes + op.delta));
+    else if (op.kind === 'title') {
+      const title = cleanText(op.title, 100);
+      if (!title) throw new Error('步骤内容不能为空');
+      step.title = title;
+    } else if (op.kind === 'remove') {
+      if (a.steps.length <= 1) throw new Error('至少保留一步');
+      a.steps.splice(op.step, 1);
+    } else if (op.kind === 'move') {
+      const to = op.step + op.dir;
+      if (to >= 0 && to < a.steps.length) a.steps.splice(to, 0, a.steps.splice(op.step, 1)[0]);
+    } else if (op.kind === 'add') {
+      if (a.steps.length >= MAX_STEPS) throw new Error('最多 ' + MAX_STEPS + ' 步');
+      a.steps.push({ title: cleanText(op.title, 100) || '新的一步', minutes: s.settings.prefs.segment || 25 });
+    } else throw new Error('不支持的修改');
+    a.minutes = sum(a.steps, (x) => x.minutes);
+    message.proposal.edited = true;
     return s;
   }
 
@@ -418,6 +464,7 @@
         title: t.title, doneOn: toDay(t.doneAt), minutes: t.minutes, space: spaceName(t.spaceId), feel: t.feel || null,
       })),
       habits: state.habits.map((h) => ({ title: h.title, targetPerWeek: h.perWeek, doneThisWeek: habitWeekCount(h, today), doneToday: !!h.log[today] })),
+      recentReflections: state.reflections.slice(-5).map((r) => ({ date: r.date, text: r.text.slice(0, 600) })),
       timerRunning: !!state.timer,
       history: state.messages.slice(-12).map((m) => ({ role: m.role, text: m.text.slice(0, 1500) })),
       message: text,
@@ -493,6 +540,7 @@
           : '现在是本地模式（没有连接 AI 模型），我把每一行当作一件事。请检查下面的提议。',
       actions,
       options: [],
+      questions: [],
       memory: [],
       startTimer: !!planned && lines.length === 1,
     };
@@ -501,7 +549,7 @@
   return {
     VERSION, SPACE_COLORS,
     clone, uid, todayISO, validDate, addDays, weekStart,
-    emptyState, normalize, validateActions, resolveProposal, addMemory,
+    emptyState, normalize, validateActions, resolveProposal, editProposal, addMemory,
     habitWeekCount, timerElapsed, timerView, startTimer, pauseTimer, resumeTimer, extendTimer, finishStep, stopTimer,
     buildProfile, buildContext, history, parseLine, splitIntoSteps, localReply,
   };

@@ -112,9 +112,36 @@
     return { text: parts.join('\n\n'), units: pdf.numPages + ' 页' };
   }
 
-  /* Returns { name, kind, text, units }. Throws a readable message for unsupported files. */
+  /* ---------- images ----------
+     Large photos are scaled down before sending: it keeps requests small and is enough for reading handwriting. */
+  const IMAGE_TYPES = /^image\/(png|jpeg|webp|gif|bmp)$/;
+  const MAX_SIDE = 1568;
+  function draw(bitmap, maxSide, quality) {
+    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return { url: canvas.toDataURL('image/jpeg', quality), width: canvas.width, height: canvas.height };
+  }
+  async function readImage(file) {
+    let bitmap;
+    try { bitmap = await createImageBitmap(file); } catch { throw new Error('这张图片打不开'); }
+    const full = draw(bitmap, MAX_SIDE, 0.86);
+    const thumb = draw(bitmap, 160, 0.7);
+    return {
+      name: file.name || '图片.jpg', kind: '图片', units: full.width + '×' + full.height, text: '',
+      image: { mediaType: 'image/jpeg', data: full.url.split(',')[1] }, thumb: thumb.url,
+    };
+  }
+
+  /* Returns { name, kind, text, units } (plus image and thumb for pictures). Throws a readable message for unsupported files. */
   async function parseFile(file) {
     if (file.size > MAX_BYTES) throw new Error('文件超过 30 MB');
+    if (IMAGE_TYPES.test(file.type) || /\.(png|jpe?g|webp|gif|bmp)$/i.test(file.name)) return readImage(file);
     const name = file.name;
     const ext = (name.match(/\.([^.]+)$/) || ['', ''])[1].toLowerCase();
     let result;
@@ -124,7 +151,7 @@
     else if (ext === 'xlsx') result = { kind: 'Excel', ...(await readXlsx(await file.arrayBuffer())) };
     else if (['doc', 'ppt', 'xls'].includes(ext)) throw new Error('旧格式 .' + ext + ' 读不了，请在 Office 或 WPS 里另存为 .' + ext + 'x');
     else if (TEXT_EXTENSIONS.test(name) || file.type.startsWith('text/')) result = { kind: '文本', text: await file.text() };
-    else throw new Error('不支持这种文件（支持 PDF、Word、PPT、Excel、文本和代码）');
+    else throw new Error('不支持这种文件（支持图片、PDF、Word、PPT、Excel、文本和代码）');
     const text = result.text.replace(/\u0000/g, '').slice(0, MAX_CHARS);
     if (!text.trim()) throw new Error('没有读到文字（可能是扫描件或图片）');
     return { name, kind: result.kind, units: result.units || text.length + ' 字', text };

@@ -7,13 +7,23 @@
   const Agent = window.TPlanAgent;
   const Files = window.TPlanFiles;
   const platform = window.TPlanPlatform;
+  const Providers = window.TPlanProviders;
   const $ = (selector) => document.querySelector(selector);
 
   let state = loadState();
+  // Settings from the first v4 build are mapped onto the provider presets; its single key moves to that provider.
+  state.settings.agent = Providers.migrate(state.settings.agent);
+  try {
+    const key = platform.loadKey(state.settings.agent.provider, state.settings.agent.provider);
+    if (key) platform.saveKey(state.settings.agent.provider, key, state.settings.agent.provider);
+  } catch { /* keys stay as they were */ }
   const ui = { view: 'chat', space: null, tab: 'today', busy: false, busyText: '', draft: '', attachments: [], parsing: 0 };
   const library = new Map(); // files read during this session, by name; kept out of saved state because they are large
   let pip = null; // floating timer window, when open
   let dueNotified = null;
+  let editing = null; // the proposal step whose title is being edited: { message, action, step }
+  const answers = new Map(); // unsent picks in question forms, by message id
+  let lastChatKey = '';
 
   /* ---------- storage ---------- */
   function loadState() {
@@ -71,6 +81,10 @@
     close: 'M6 6l12 12M18 6L6 18',
     pop: 'M14 4h6v6M20 4l-8 8M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
     file: 'M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7Zm0 0v4h4',
+    minus: 'M6 12h12',
+    up: 'M6 14l6-6 6 6',
+    shrink: 'M5 19h14',
+    grow: 'M8 4H4v4M16 20h4v-4M4 4l6 6M20 20l-6-6',
   };
   function icon(name) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -111,9 +125,14 @@
   };
   const modelName = () => {
     const a = state.settings.agent;
-    return a.modelId && (a.provider === 'anthropic' || a.baseUrl) ? a.modelId : null;
+    return a.modelId && a.baseUrl ? a.modelId : null;
   };
   const say = (s, text, extra) => s.messages.push({ id: C.uid('msg'), role: 'assistant', at: Date.now(), source: 'local', text, ...extra });
+
+  const fileChip = (f, onRemove) => h('span', { class: 'file-chip' + (f.thumb ? ' has-thumb' : '') },
+    f.thumb ? h('img', { class: 'thumb', src: f.thumb, alt: '' }) : icon('file'),
+    h('span', { class: 'file-name' }, f.name), h('span', { class: 'sub' }, f.kind + ' · ' + f.units),
+    onRemove ? h('button', { class: 'chip-x', 'aria-label': '移除 ' + f.name, onclick: onRemove }, icon('close')) : null);
 
   /* ---------- first-run interview: three questions answered by clicking ---------- */
   const ONBOARDING = [
@@ -242,12 +261,37 @@
     const sp = a.spaceId ? ' · ' + (space(a.spaceId) || {}).name : '';
     return dateLabel(a.date) + ' · ' + minutesLabel(a.minutes) + sp;
   }
-  const stepList = (steps) => h('ol', { class: 'steps' }, steps.map((s) => h('li', {}, h('span', {}, s.title), h('span', { class: 'sub' }, s.minutes + ' 分钟'))));
-  function actionItem(a) {
+  const stepList = (steps) => h('ol', { class: 'steps' }, steps.map((s, i) => h('li', {}, h('span', { class: 'num' }, i + 1 + '.'), h('span', { class: 'step-title' }, s.title), h('span', { class: 'sub' }, s.minutes + ' 分钟'))));
+  /* The same list with controls: rename, change minutes, reorder, remove, add. */
+  function editableSteps(message, index, a) {
+    const steps = a.steps || [{ title: a.title, minutes: a.minutes }];
+    const edit = (op) => { try { commit(C.editProposal(state, message.id, index, op)); } catch (error) { toast(error.message); } };
+    const mini = (label, glyph, onclick, disabled) => h('button', { class: 'mini', 'aria-label': label, title: label, onclick, disabled }, icon(glyph));
+    const isEditing = (i) => editing && editing.message === message.id && editing.action === index && editing.step === i;
+    const titleInput = (s, i) => h('input', {
+      class: 'step-input', value: s.title, maxLength: 100, 'aria-label': '第 ' + (i + 1) + ' 步的内容',
+      onkeydown: (e) => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') { editing = null; render(); } },
+      onblur: (e) => { if (!editing) return; editing = null; if (e.target.value.trim() && e.target.value.trim() !== s.title) edit({ kind: 'title', step: i, title: e.target.value }); else render(); },
+    });
+    return h('div', { class: 'steps-edit' },
+      h('ol', { class: 'steps' }, steps.map((s, i) => h('li', {},
+        h('span', { class: 'num' }, i + 1 + '.'),
+        isEditing(i) ? titleInput(s, i) : h('button', { class: 'step-title editable', title: '点击修改', onclick: () => { editing = { message: message.id, action: index, step: i }; render(); } }, s.title),
+        h('span', { class: 'step-tools' },
+          mini('减少 5 分钟', 'minus', () => edit({ kind: 'minutes', step: i, delta: -5 }), s.minutes <= 5),
+          h('span', { class: 'step-min' }, s.minutes + ' 分'),
+          mini('增加 5 分钟', 'plus', () => edit({ kind: 'minutes', step: i, delta: 5 })),
+          mini('上移', 'up', () => edit({ kind: 'move', step: i, dir: -1 }), i === 0),
+          mini('删除这一步', 'close', () => edit({ kind: 'remove', step: i }), steps.length <= 1))))),
+      h('div', { class: 'steps-foot' },
+        h('button', { class: 'pill soft', onclick: () => edit({ kind: 'add' }) }, icon('plus'), '加一步'),
+        h('span', { class: 'sub' }, '共 ' + minutesLabel(steps.reduce((n, s) => n + s.minutes, 0)) + ' · 点文字可以修改')));
+  }
+  function actionItem(a, index, message) {
     const name = (id) => (state.tasks.find((t) => t.id === id) || {}).title || '（任务已不存在）';
     const line = (kind, title, meta, extra) => h('li', {},
       h('div', { class: 'p-line' }, h('span', { class: 'tag t-' + a.type }, kind), h('span', { class: 'p-title' }, title), meta ? h('span', { class: 'sub' }, meta) : null), extra);
-    if (a.type === 'add_task') return line('新任务', a.title, taskSummary(a), a.steps ? stepList(a.steps) : null);
+    if (a.type === 'add_task') return line('新任务', a.title, taskSummary(a), message.proposal.status === 'pending' ? editableSteps(message, index, a) : a.steps ? stepList(a.steps) : null);
     if (a.type === 'update_task') {
       const parts = [];
       if (a.title !== undefined) parts.push('改名为「' + a.title + '」');
@@ -262,6 +306,13 @@
       return line('新目标', a.title, a.deadline ? '截止 ' + plainDate(a.deadline) : '', h('div', { class: 'goal-plan' }, a.milestones.map((m) => h('div', { class: 'milestone' },
         h('div', { class: 'milestone-title' }, m.title, m.due ? h('span', { class: 'sub' }, ' · ' + plainDate(m.due) + ' 前') : null),
         h('ul', {}, m.tasks.map((t) => h('li', {}, h('span', {}, t.title), h('span', { class: 'sub' }, taskSummary(t) + (t.steps ? ' · ' + t.steps.length + ' 段' : '')))))))));
+    }
+    if (a.type === 'add_reflection') {
+      const pending = message.proposal.status === 'pending';
+      return line('反思', a.date ? dateLabel(a.date) : '今天', pending ? '可以先改正识别错的字' : '', pending
+        ? h('textarea', { class: 'reflection-edit', rows: Math.min(12, a.text.split('\n').length + 2), maxLength: 4000, value: a.text, 'aria-label': '反思内容',
+          onchange: (e) => { try { commit(C.editProposal(state, message.id, index, { kind: 'text', text: e.target.value })); } catch (error) { toast(error.message); } } })
+        : h('p', { class: 'reflection-text' }, a.text));
     }
     return line('记住', a.text);
   }
@@ -281,8 +332,8 @@
       } catch (error) { toast(error.message); }
     };
     return h('div', { class: 'proposal ' + p.status },
-      h('div', { class: 'proposal-head' }, h('strong', {}, '提议 · ' + p.actions.length + ' 项'), h('span', { class: 'sub' }, status)),
-      h('ul', { class: 'p-list' }, p.actions.map(actionItem)),
+      h('div', { class: 'proposal-head' }, h('strong', {}, '提议 · ' + p.actions.length + ' 项'), h('span', { class: 'sub' }, (p.edited ? '你修改过 · ' : '') + status)),
+      h('ul', { class: 'p-list' }, p.actions.map((a, i) => actionItem(a, i, message))),
       p.status === 'pending' ? h('div', { class: 'proposal-actions' },
         canTime ? h('button', { class: 'btn dark', onclick: () => resolve(true, true) }, icon('play'), '确认并开始计时') : null,
         h('button', { class: canTime ? 'btn outline slim' : 'btn dark', onclick: () => resolve(true, false) }, canTime ? '只确认' : '确认写入'),
@@ -301,29 +352,62 @@
     }
     send(option.label);
   }
+  /* A form the assistant can ask with: pick options, optionally add a note, send once. */
+  function questionCard(m, isLast) {
+    const live = isLast && !m.answered && !ui.busy;
+    if (!answers.has(m.id)) answers.set(m.id, { picks: m.questions.map(() => []), note: '' });
+    const draft = answers.get(m.id);
+    const ready = () => draft.picks.every((p) => p.length) || draft.note.trim();
+    const submit = () => {
+      if (!ready()) return toast('请先选择，或者写一句补充');
+      const lines = m.questions.map((q, i) => (draft.picks[i].length ? q.question + ' ' + draft.picks[i].join('、') : null)).filter(Boolean);
+      if (draft.note.trim()) lines.push(draft.note.trim());
+      answers.delete(m.id);
+      if (change((s) => { s.messages.find((x) => x.id === m.id).answered = true; })) send(lines.join('\n'));
+    };
+    return h('div', { class: 'ask' + (live ? '' : ' closed') },
+      m.questions.map((q, i) => h('fieldset', { class: 'ask-q', disabled: !live },
+        h('legend', {}, h('span', { class: 'num' }, i + 1 + '.'), q.question, q.multi ? h('span', { class: 'sub' }, ' 可多选') : null),
+        h('div', { class: 'ask-options' }, q.options.map((option) => {
+          const on = draft.picks[i].includes(option);
+          return h('button', { class: 'pill pick' + (on ? ' on' : ''), 'aria-pressed': String(on), onclick: () => {
+            draft.picks[i] = q.multi ? (on ? draft.picks[i].filter((x) => x !== option) : [...draft.picks[i], option]) : (on ? [] : [option]);
+            render();
+          } }, on ? icon('check') : null, option);
+        })))),
+      live ? h('div', { class: 'ask-foot' },
+        h('input', { class: 'ask-note', placeholder: '想补充的话写在这里（可以不写）', maxLength: 300, value: draft.note,
+          oninput: (e) => { draft.note = e.target.value; }, onkeydown: (e) => { if (e.key === 'Enter' && !e.isComposing) submit(); } }),
+        h('button', { class: 'btn dark', onclick: submit }, '发送')) : h('span', { class: 'sub' }, m.answered ? '已回答' : '已跳过'));
+  }
   function messageRow(m, isLast) {
     const mine = m.role === 'user';
     return h('div', { class: 'msg ' + (mine ? 'mine' : 'theirs') },
       h('div', { class: 'msg-meta' }, h('strong', {}, mine ? '你' : '规划助手'), h('span', {}, timeLabel(m.at)),
         m.source === 'local' && m.proposal ? h('span', { class: 'chip' }, '本地模式') : null,
         m.toolCalls ? h('span', { class: 'chip' }, '读取了 ' + m.toolCalls + ' 次资料') : null),
-      m.attachments ? h('div', { class: 'files' }, m.attachments.map((f) => h('span', { class: 'file-chip' }, icon('file'), f.name, h('span', { class: 'sub' }, f.kind + ' · ' + f.units)))) : null,
+      m.attachments ? h('div', { class: 'files' }, m.attachments.map((f) => fileChip(f))) : null,
       m.text ? h('div', { class: 'bubble' + (m.error ? ' error' : '') }, m.text) : null,
       m.learned ? h('div', { class: 'learned' }, icon('brain'), '已记住：' + m.learned.join('；')) : null,
       m.proposal ? proposalCard(m) : null,
+      m.questions ? questionCard(m, isLast) : null,
       isLast && m.options && !ui.busy ? h('div', { class: 'options' }, m.options.map((o) => h('button', { class: 'pill option', onclick: () => chooseOption(o) }, o.label))) : null);
   }
   function renderChat() {
     const model = modelName();
     const last = state.messages.length - 1;
+    const previous = $('#chatScroll');
+    const offset = previous ? previous.scrollTop : 0;
+    const chatKey = state.messages.length + ':' + ui.busy + ':' + ui.busyText;
     const scroller = h('div', { class: 'chat-scroll', id: 'chatScroll' },
       state.messages.map((m, i) => messageRow(m, i === last)),
       ui.busy ? h('div', { class: 'msg theirs' }, h('div', { class: 'bubble typing', role: 'status' }, h('i'), h('i'), h('i'), ui.busyText ? h('span', { class: 'sub' }, ui.busyText) : null)) : null);
     const input = h('textarea', {
       id: 'composer', rows: 2, maxLength: 4000, value: ui.draft,
-      placeholder: model ? '说说你想做什么，或把课件、代码文件拖进来' : '本地模式：例如「单片机 2小时」。连接模型后可以读课件',
+      placeholder: model ? '说说你想做什么，或把课件、图片、代码文件拖进来' : '本地模式：例如「单片机 2小时」。连接模型后可以读课件',
       oninput: (e) => { ui.draft = e.target.value; updateSend(); },
       onkeydown: (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } },
+      onpaste: (e) => { const files = [...(e.clipboardData ? e.clipboardData.files : [])]; if (files.length) { e.preventDefault(); addFiles(files); } },
     });
     const picker = h('input', { type: 'file', multiple: true, hidden: true, onchange: (e) => { addFiles(e.target.files); e.target.value = ''; } });
     const main = $('#main');
@@ -332,21 +416,23 @@
         h('div', {}, h('h2', {}, '规划助手'), h('p', { class: 'sub' }, model ? '模型：' + model : '本地模式 · 还没有连接 AI 模型')),
         h('div', { class: 'head-actions' },
           h('button', { class: 'pill soft', onclick: openMemoryDialog }, icon('brain'), h('span', {}, '记忆 ' + state.memory.length + ' 条')),
-          !model ? h('button', { class: 'pill soft', onclick: openSettingsDialog }, icon('plus'), h('span', {}, '连接模型')) : null)),
+          !model ? h('button', { class: 'pill soft', onclick: () => openSettingsDialog() }, icon('plus'), h('span', {}, '连接模型')) : null)),
       scroller,
       h('div', { class: 'composer' },
         ui.attachments.length || ui.parsing ? h('div', { class: 'files' },
-          ui.attachments.map((f) => h('span', { class: 'file-chip' }, icon('file'), f.name, h('span', { class: 'sub' }, f.kind + ' · ' + f.units),
-            h('button', { class: 'chip-x', 'aria-label': '移除 ' + f.name, onclick: () => { ui.attachments = ui.attachments.filter((x) => x !== f); render(); } }, icon('close')))),
+          ui.attachments.map((f) => fileChip(f, () => { ui.attachments = ui.attachments.filter((x) => x !== f); render(); })),
           ui.parsing ? h('span', { class: 'file-chip' }, '正在读取文件…') : null) : null,
         input,
         h('div', { class: 'composer-bar' },
-          h('button', { class: 'icon-btn small', 'aria-label': '添加文件', title: '添加课件或代码文件', onclick: () => picker.click() }, icon('clip')), picker,
+          h('button', { class: 'icon-btn small', 'aria-label': '添加文件', title: '添加课件、图片或代码文件', onclick: () => picker.click() }, icon('clip')), picker,
           h('span', { class: 'sub grow' }, ui.space ? '当前分区：' + space(ui.space).name : '助手只会提议，你确认后才写入'),
           h('button', { class: 'send', id: 'send', 'aria-label': '发送', onclick: () => send() }, icon('send')))),
       h('div', { class: 'drop-hint' }, icon('file'), '松开，把文件交给助手'));
     updateSend();
-    scroller.scrollTop = scroller.scrollHeight;
+    scroller.scrollTop = previous && chatKey === lastChatKey ? offset : scroller.scrollHeight;
+    lastChatKey = chatKey;
+    const stepInput = main.querySelector('.step-input');
+    if (stepInput) { stepInput.focus(); stepInput.select(); }
   }
   function updateSend() {
     const button = $('#send');
@@ -362,7 +448,7 @@
     for (const file of files) {
       try {
         const parsed = await Files.parseFile(file);
-        library.set(parsed.name, parsed);
+        if (!parsed.image) library.set(parsed.name, parsed);
         ui.attachments = ui.attachments.filter((x) => x.name !== parsed.name).concat(parsed);
       } catch (error) {
         toast(file.name + '：' + error.message);
@@ -382,12 +468,18 @@
   };
   async function send(preset) {
     const attachments = preset ? [] : ui.attachments;
-    const text = (preset || ui.draft).trim() || (attachments.length ? '请根据这些文件帮我安排学习。' : '');
+    const pictures = attachments.filter((f) => f.image);
+    const text = (preset || ui.draft).trim() || (pictures.length ? '请读一下图片里的内容，并帮我记录下来。' : attachments.length ? '请根据这些文件帮我安排学习。' : '');
     if (!text || ui.busy) return;
+    if (pictures.length) {
+      if (!modelName()) return toast('读图片需要先连接 AI 模型');
+      if (!platform.canSeeImages) return toast('桌面版暂时不能发送图片');
+      if (state.settings.agent.vision === false) return toast('测试时这个模型不能识图。请在设置里换一个能识图的模型。');
+    }
     const context = C.buildContext(state, today(), text);
     if (ui.space) context.currentSpace = space(ui.space).name;
     const sent = { id: C.uid('msg'), role: 'user', text, at: Date.now() };
-    if (attachments.length) sent.attachments = attachments.map((f) => ({ name: f.name, kind: f.kind, units: f.units }));
+    if (attachments.length) sent.attachments = attachments.map((f) => ({ name: f.name, kind: f.kind, units: f.units, ...(f.thumb ? { thumb: f.thumb } : {}) }));
     if (!change((s) => s.messages.push(sent))) return;
     if (!preset) { ui.draft = ''; ui.attachments = []; }
     const useModel = !!modelName();
@@ -400,7 +492,7 @@
       if (useModel) {
         answer = await Agent.run({
           context, attachments, library,
-          chat: (system, user) => platform.chat(state.settings.agent, system, user),
+          chat: (system, user, images) => platform.chat(state.settings.agent, system, user, images),
           tools: {
             read_path: async (a) => { const body = await platform.readPath(String(a.path)); return { path: a.path, totalChars: body.length, text: body.slice(0, 8000) }; },
             list_dir: async (a) => ({ path: a.path, entries: await platform.listDir(String(a.path)) }),
@@ -428,7 +520,8 @@
       const actions = checked.actions.filter((a) => a.type !== 'remember');
       if (actions.length) message.proposal = { status: 'pending', source: message.source, actions, startTimer: answer.startTimer };
       if (checked.rejected.length) message.text += '\n（有 ' + checked.rejected.length + ' 项提议格式不对，已忽略。）';
-      if (answer.options.length) message.options = answer.options.map((label) => ({ label }));
+      if (answer.questions.length) message.questions = answer.questions;
+      else if (answer.options.length) message.options = answer.options.map((label) => ({ label }));
       if (answer.toolCalls) message.toolCalls = answer.toolCalls;
       s.messages.push(message);
       if (s.messages.length > 400) s.messages = s.messages.slice(-400);
@@ -444,8 +537,11 @@
   async function openFloating() {
     if (pip || !('documentPictureInPicture' in window)) return;
     try {
-      const win = await window.documentPictureInPicture.requestWindow({ width: 340, height: 250 });
+      const compact = state.settings.prefs.timerCompact;
+      const win = await window.documentPictureInPicture.requestWindow({ width: compact ? 300 : 340, height: compact ? 84 : 250 });
       for (const link of document.querySelectorAll('link[rel=stylesheet]')) win.document.head.append(link.cloneNode());
+      win.document.documentElement.className = 'light'; // the floating timer stays light whatever the system theme
+      win.document.title = '计时';
       win.document.body.className = 'pip-body';
       win.addEventListener('pagehide', () => { pip = null; renderDock(); });
       pip = win;
@@ -484,12 +580,28 @@
     if (!view) { inPage.hidden = true; inPage.replaceChildren(); return; }
     const button = (label, cls, onclick, glyph) => h('button', { class: 'btn ' + cls, onclick }, glyph ? icon(glyph) : null, label);
     const last = view.index === view.total - 1;
-    const content = h('div', { class: 'dock-card' },
+    const compact = state.settings.prefs.timerCompact;
+    const setCompact = (value) => {
+      if (pip) { try { pip.resizeTo(value ? 300 : 340, value ? 84 + (pip.outerHeight - pip.innerHeight) : 250 + (pip.outerHeight - pip.innerHeight)); } catch { /* size stays as the user left it */ } }
+      change((s) => { s.settings.prefs.timerCompact = value; });
+    };
+    const iconButton = (label, glyph, onclick, cls) => h('button', { class: 'icon-btn small ' + (cls || ''), 'aria-label': label, title: label, onclick }, icon(glyph));
+    const content = compact ? h('div', { class: 'dock-card compact' },
+      h('div', { class: 'dock-row' },
+        h('div', { class: 'dock-time', id: 'dockTime' }),
+        h('div', { class: 'dock-titles' }, h('span', { class: 'sub' }, '第 ' + (view.index + 1) + '/' + view.total + ' 段'), h('strong', { class: 'dock-step', title: view.step.title }, view.step.title)),
+        view.running ? iconButton('暂停', 'pause', () => commit(C.pauseTimer(state, Date.now()))) : iconButton('继续', 'play', () => commit(C.resumeTimer(state, Date.now()))),
+        iconButton(last ? '完成' : '下一段', 'check', finishCurrentStep, 'solid'),
+        iconButton('展开', 'grow', () => setCompact(false))),
+      h('div', { class: 'dock-dots', 'aria-hidden': 'true' }, view.task.steps.map((s, i) => h('span', { class: s.done ? 'done' : i === view.index ? 'now' : '', style: 'flex:' + s.minutes }, i === view.index ? h('i', { id: 'dockFill' }) : null))))
+    : h('div', { class: 'dock-card' },
       h('div', { class: 'dock-head' },
         h('div', { class: 'dock-titles' },
           h('span', { class: 'sub' }, view.task.title + ' · 第 ' + (view.index + 1) + '/' + view.total + ' 段'),
           h('strong', { class: 'dock-step' }, view.step.title)),
-        !pip && 'documentPictureInPicture' in window ? h('button', { class: 'icon-btn small', 'aria-label': '打开悬浮窗', title: '悬浮窗', onclick: openFloating }, icon('pop')) : null),
+        h('div', { class: 'dock-corner' },
+          iconButton('最小化', 'shrink', () => setCompact(true)),
+          !pip && 'documentPictureInPicture' in window ? iconButton('打开悬浮窗', 'pop', openFloating) : null)),
       h('div', { class: 'dock-time', id: 'dockTime' }),
       h('div', { class: 'dock-dots', 'aria-hidden': 'true' }, view.task.steps.map((s, i) => h('span', { class: s.done ? 'done' : i === view.index ? 'now' : '', style: 'flex:' + s.minutes }, i === view.index ? h('i', { id: 'dockFill' }) : null))),
       h('div', { class: 'dock-actions' },
@@ -559,6 +671,14 @@
         h('section', { class: 'card' }, h('h3', {}, '助手对你的了解'),
           h('ul', { class: 'plain' }, profileLines().map((line) => h('li', {}, line))),
           h('div', { class: 'row' }, h('button', { class: 'pill soft', onclick: openMemoryDialog }, icon('brain'), '查看和修改长期记忆（' + state.memory.length + ' 条）'))),
+        h('section', { class: 'card' },
+          h('div', { class: 'card-head' }, h('h3', {}, '反思'), h('button', { class: 'pill soft', onclick: () => openReflectionDialog(null) }, icon('plus'), '写一条')),
+          state.reflections.length ? h('div', { class: 'reflections' }, [...state.reflections].reverse().slice(0, 30).map((r) => h('article', { class: 'reflection' },
+            h('header', {}, h('strong', {}, dateLabel(r.date)), h('span', { class: 'sub' }, r.source === 'user' ? '自己写的' : '助手记录的'),
+              h('span', { class: 'grow' }),
+              h('button', { class: 'icon-btn small', 'aria-label': '修改这条反思', title: '修改', onclick: () => openReflectionDialog(r) }, icon('gear'))),
+            h('p', { class: 'reflection-text' }, r.text))))
+            : h('p', { class: 'empty' }, '还没有反思。可以把写在本子上的反思拍照拖进聊天框，助手会读出文字并记录在这里。')),
         h('section', { class: 'card' }, h('h3', {}, '每天的专注时间'),
           h('div', { class: 'bars' }, days.map((d, i) => h('div', { class: 'bar' + (d === t ? ' today' : '') },
             h('span', { class: 'bar-value' }, perDay[i] ? String(perDay[i]) : ''),
@@ -690,30 +810,111 @@
     form.text.focus();
   }
 
-  function openSettingsDialog() {
-    const a = state.settings.agent;
+  function openReflectionDialog(current) {
+    const form = openDialog(current ? '修改反思' : '写一条反思', [
+      field('日期', h('input', { name: 'date', type: 'date', value: current ? current.date : today() })),
+      field('内容', h('textarea', { name: 'text', rows: 8, maxLength: 4000, value: current ? current.text : '' })),
+    ], [
+      current ? h('button', { type: 'button', class: 'btn danger', onclick: () => { if (confirm('删除这条反思？')) { change((s) => { s.reflections = s.reflections.filter((x) => x.id !== current.id); }); closeDialog(); } } }, '删除') : null,
+      h('span', { class: 'grow' }), cancelButton(),
+      h('button', { class: 'btn dark', onclick: () => {
+        const text = form.text.value.trim();
+        const date = C.validDate(form.date.value) ? form.date.value : today();
+        if (!text) return toast('请写一点内容');
+        const ok = change((s) => {
+          if (current) Object.assign(s.reflections.find((x) => x.id === current.id), { text, date });
+          else s.reflections.push({ id: C.uid('r'), date, text, at: Date.now(), source: 'user' });
+        });
+        if (ok) closeDialog();
+      } }, '保存'),
+    ]);
+    form.text.focus();
+  }
+
+  /* A tiny picture with digits in it, used to check whether a model can read images. */
+  function probeImage() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 240; canvas.height = 96;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 240, 96);
+    ctx.fillStyle = '#111'; ctx.font = 'bold 56px sans-serif'; ctx.textBaseline = 'middle';
+    ctx.fillText('4 2 7', 36, 50);
+    return { mediaType: 'image/jpeg', data: canvas.toDataURL('image/jpeg', 0.9).split(',')[1] };
+  }
+
+  /* Settings work on a draft. Choosing a provider fills in its address; pasting a key loads its models. */
+  function openSettingsDialog(draft) {
+    const d = draft && draft.provider ? draft : { ...state.settings.agent, key: '', status: [], busy: '', manual: false };
+    const preset = Providers.find(d.provider);
     const prefs = state.settings.prefs;
-    const baseField = field('接口地址（OpenAI 兼容）', h('input', { name: 'baseUrl', value: a.baseUrl, placeholder: '例如 https://api.deepseek.com' }));
-    const provider = h('select', { name: 'provider', onchange: () => { baseField.hidden = provider.value === 'anthropic'; } },
-      h('option', { value: 'openai', selected: a.provider !== 'anthropic' }, 'OpenAI 兼容接口（DeepSeek、OpenAI、本机模型等）'),
-      h('option', { value: 'anthropic', selected: a.provider === 'anthropic' }, 'Anthropic（Claude）'));
-    baseField.hidden = a.provider === 'anthropic';
+    const savedKey = platform.loadKey(d.provider);
+    const key = () => d.key || savedKey;
+    const again = () => openSettingsDialog(d);
+    const run = async (label, job) => {
+      if (d.busy) return;
+      d.busy = label; d.status = []; again();
+      try { await job(); } catch (error) { d.status.push(['bad', error.message]); }
+      d.busy = ''; again();
+    };
+    const loadModels = () => run('正在读取模型…', async () => {
+      d.models = await platform.listModels(d, key());
+      if (!d.models.length) throw new Error('服务商没有返回可用的模型，请手动填写模型名称。');
+      if (!d.models.includes(d.modelId)) d.modelId = d.models[0];
+      d.manual = false;
+      d.status.push(['ok', '读到 ' + d.models.length + ' 个模型，请在下面选择。']);
+    });
+    const testConnection = () => run('正在测试…', async () => {
+      const started = Date.now();
+      const reply = await platform.chat(d, '你是连接测试。', '请只回复两个字：正常', [], key());
+      d.status.push(['ok', '连接正常，用时 ' + ((Date.now() - started) / 1000).toFixed(1) + ' 秒。模型回答：' + (reply.trim().slice(0, 40) || '（空）')]);
+      if (!platform.canSeeImages) return;
+      try {
+        const seen = await platform.chat(d, '你是识图测试。', '图片里有三个数字，请只回复这三个数字。', [probeImage()], key());
+        d.vision = /4\s*2\s*7/.test(seen);
+        d.status.push(d.vision ? ['ok', '这个模型可以识图，可以把照片拖进聊天框。'] : ['warn', '这个模型没有读出测试图片里的数字，可能不能识图。']);
+      } catch (error) {
+        d.vision = false;
+        d.status.push(['warn', '这个模型不能识图（' + error.message + '）。文字功能不受影响。']);
+      }
+    });
     const importInput = h('input', { type: 'file', accept: '.json,application/json', hidden: true, onchange: async (e) => {
       const file = e.target.files[0];
       if (!file) return;
       try {
         const next = C.normalize(JSON.parse(await file.text()));
+        next.settings.agent = Providers.migrate(next.settings.agent);
         if (!confirm('导入会替换现在的全部数据（' + next.tasks.length + ' 个任务，' + next.habits.length + ' 个习惯）。继续吗？')) return;
         if (commit(next)) { closeDialog(); toast('已导入'); }
       } catch (error) { toast('导入失败：' + error.message); }
     } });
+    const useList = d.models.length && !d.manual;
+    const modelControl = useList
+      ? h('select', { name: 'modelId', onchange: (e) => { d.modelId = e.target.value; d.vision = null; } },
+        (d.models.includes(d.modelId) || !d.modelId ? d.models : [d.modelId, ...d.models]).map((id) => h('option', { value: id, selected: id === d.modelId }, id)))
+      : h('input', { name: 'modelId', value: d.modelId, placeholder: '填写模型名称，或者先读取模型列表', oninput: (e) => { d.modelId = e.target.value.trim(); d.vision = null; } });
     const form = openDialog('设置', [
       h('h3', {}, 'AI 模型'),
-      field('服务商', provider), baseField,
-      field('模型名称', h('input', { name: 'modelId', value: a.modelId, placeholder: '填写服务商提供的模型名称' })),
-      field('API 密钥', h('input', { name: 'key', type: 'password', autocomplete: 'off', placeholder: platform.loadSecret() ? '已保存，留空表示不修改' : '只保存在这台电脑上' })),
-      h('p', { class: 'sub' }, platform.name === 'desktop' ? '密钥由 Windows 当前账户加密保存。' : '浏览器预览模式：密钥保存在这个浏览器里。'),
-      h('p', { class: 'sub' }, '发送消息时，你的任务、习惯、计时统计、长期记忆、最近的对话，以及你附上的文件里的文字，会发给这个模型服务。'),
+      field('服务商', h('select', { name: 'provider', onchange: (e) => {
+        Object.assign(d, { provider: e.target.value, baseUrl: Providers.find(e.target.value).baseUrl, modelId: '', models: [], vision: null, key: '', status: [], manual: false });
+        again();
+      } }, Providers.PROVIDERS.map((p) => h('option', { value: p.id, selected: p.id === d.provider }, p.name)))),
+      preset.note ? h('p', { class: 'sub' }, preset.note) : null,
+      field('API 密钥', h('input', {
+        name: 'key', type: 'password', autocomplete: 'off', value: d.key, placeholder: savedKey ? '已保存，留空表示不修改' : '粘贴密钥后会自动读取模型',
+        oninput: (e) => { d.key = e.target.value.trim(); },
+        onpaste: () => setTimeout(() => { if (d.key && d.baseUrl) loadModels(); }, 0),
+      })),
+      h('div', { class: 'field' }, h('span', {}, '模型'),
+        h('div', { class: 'row tight' }, modelControl,
+          h('button', { type: 'button', class: 'btn outline slim', disabled: !!d.busy, onclick: loadModels }, '读取模型'),
+          d.models.length ? h('button', { type: 'button', class: 'btn ghost', onclick: () => { d.manual = !d.manual; again(); } }, d.manual ? '从列表选' : '手动填写') : null)),
+      h('details', { class: 'advanced', open: d.provider === 'custom' }, h('summary', {}, '接口地址'),
+        h('input', { name: 'baseUrl', value: d.baseUrl, placeholder: 'https://…/v1', 'aria-label': '接口地址', oninput: (e) => { d.baseUrl = e.target.value.trim(); } })),
+      h('div', { class: 'row tight' },
+        h('button', { type: 'button', class: 'btn outline slim', disabled: !!d.busy, onclick: testConnection }, '测试连接'),
+        d.busy ? h('span', { class: 'sub', role: 'status' }, d.busy) : d.vision === true ? h('span', { class: 'sub' }, '可以识图') : d.vision === false ? h('span', { class: 'sub' }, '不能识图') : null),
+      d.status.length ? h('ul', { class: 'status', role: 'status' }, d.status.map(([kind, text]) => h('li', { class: kind }, text))) : null,
+      h('p', { class: 'sub' }, (platform.name === 'desktop' ? '密钥由 Windows 当前账户加密保存。' : '密钥只保存在这个浏览器里，每个服务商分开保存。') + '发送消息时，你的任务、习惯、计时统计、长期记忆、最近的对话，以及附上的文件和图片，会发给这个模型服务。'),
       h('h3', {}, '我的节奏'),
       h('div', { class: 'row' },
         field('一段专注（分钟）', h('input', { name: 'segment', type: 'number', min: 5, max: 90, value: prefs.segment })),
@@ -730,14 +931,13 @@
     ], [
       h('span', { class: 'grow' }), cancelButton(),
       h('button', { class: 'btn dark', onclick: () => {
-        const baseUrl = form.baseUrl.value.trim();
         const segment = Math.round(Number(form.segment.value));
         const daily = Math.round(Number(form.daily.value));
-        if (provider.value === 'openai' && baseUrl && !/^https:\/\/|^http:\/\/(localhost|127\.0\.0\.1)/.test(baseUrl)) return toast('接口地址需要 https，本机模型可以用 http://localhost');
         if (!(segment >= 5 && segment <= 90)) return toast('一段专注请填 5–90 分钟');
-        try { if (form.key.value) platform.saveSecret(form.key.value); } catch (error) { return toast('密钥没有保存：' + error.message); }
+        if (d.modelId) { try { Providers.chatRequest(d, 'x', '', ''); } catch (error) { return toast(error.message); } }
+        try { if (d.key) platform.saveKey(d.provider, d.key); } catch (error) { return toast('密钥没有保存：' + error.message); }
         const ok = change((s) => {
-          s.settings.agent = { provider: provider.value, baseUrl, modelId: form.modelId.value.trim() };
+          s.settings.agent = { provider: d.provider, baseUrl: d.baseUrl, modelId: d.modelId, models: d.models, vision: d.vision };
           s.settings.prefs.segment = segment;
           s.settings.prefs.dailyMinutes = daily > 0 ? daily : null;
         });
@@ -756,7 +956,7 @@
   }
   document.querySelectorAll('.top-nav .pill').forEach((b) => b.addEventListener('click', () => { ui.view = b.dataset.view; render(); }));
   $('#openSettings').append(icon('gear'));
-  $('#openSettings').addEventListener('click', openSettingsDialog);
+  $('#openSettings').addEventListener('click', () => openSettingsDialog());
   $('#dialog').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeDialog(); });
 
   /* Files can be dropped anywhere in the window. */
