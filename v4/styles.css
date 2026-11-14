@@ -405,3 +405,26 @@ body.resizing { cursor: col-resize; user-select: none; }
   .glow { animation: none; }
   .rail-item .avatar { transform: none; }
 }
+
+/* 6. horizontal accordion (days of the week) */
+.accordion { display: flex; gap: 8px; height: 220px; }
+.strip { --level: 0; position: relative; flex: 1 1 0; min-width: 40px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); overflow: hidden; text-align: left; isolation: isolate; transition: flex-grow .38s cubic-bezier(.3, .7, .2, 1), border-color .2s; }
+.strip::before { content: ""; position: absolute; left: 0; width: min(100%, 64px); bottom: 0; height: max(4px, calc(var(--level) * 72%)); z-index: -1; background: color-mix(in srgb, var(--t3) 26%, transparent); transition: height .4s; }
+.strip.today::before { background: color-mix(in srgb, var(--accent) 34%, transparent); }
+.strip:hover { border-color: var(--t3); }
+.strip.open { flex-grow: 7; border-color: var(--ink); }
+.strip-top { position: absolute; top: 10px; left: 0; width: min(100%, 64px); display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.strip-day { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--soft); font-size: 13px; font-weight: 650; }
+.strip.today .strip-day { background: var(--accent); color: #fff; }
+.strip-min { font-size: 11.5px; color: var(--t2); font-variant-numeric: tabular-nums; }
+.strip-name { position: absolute; left: calc(min(100%, 64px) / 2); bottom: 12px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; line-height: 1.2; font-size: 12.5px; font-weight: 600; color: var(--t2); letter-spacing: .08em; white-space: nowrap; transition: opacity .15s; }
+.strip.open .strip-name { opacity: 0; }
+/* Details wait for the width change to finish, and leave at once when the strip closes. */
+.strip-content { position: absolute; inset: 12px 14px 12px 70px; display: flex; flex-direction: column; gap: 8px; min-width: 200px; opacity: 0; visibility: hidden; transition: opacity .12s, visibility 0s .12s; }
+.strip.open .strip-content { opacity: 1; visibility: visible; transition: opacity .25s .38s, visibility 0s .38s; }
+.strip-stats { display: flex; gap: 18px; flex-wrap: wrap; }
+.strip-stats > span { display: flex; flex-direction: column; font-size: 12px; color: var(--t2); }
+.strip-stats b { font-size: 17px; color: var(--text); font-variant-numeric: tabular-nums; }
+.strip-list { display: flex; flex-direction: column; gap: 2px; font-size: 13.5px; overflow: hidden; }
+.strip-list > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .strip, .strip::before, .strip-content, .strip.open .strip-content, .strip-name { transition: none !important; } }

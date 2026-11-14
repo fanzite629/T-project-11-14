@@ -798,6 +798,43 @@
     if (p.sessionsRecorded < 3) lines.push('计时记录还只有 ' + p.sessionsRecorded + ' 段。用计时完成 3 段以上，助手就能开始根据你的真实速度调整。');
     return lines;
   }
+  /* Seven narrow day strips side by side. Clicking one widens it while the others narrow together;
+     its details fade in only after the width has settled, so text is never squeezed mid-animation. */
+  let reviewDay = null;
+  function dayAccordion(days, sessions, max) {
+    const t = today();
+    if (!days.includes(reviewDay)) reviewDay = days.includes(t) ? t : days[0];
+    const box = h('div', { class: 'accordion', role: 'tablist', 'aria-label': '本周每天' });
+    days.forEach((d, i) => {
+      const mine = sessions.filter((x) => x.date === d);
+      const minutes = mine.reduce((n, x) => n + x.actual, 0);
+      const done = state.tasks.filter((x) => x.done && x.doneAt && C.todayISO(new Date(x.doneAt)) === d);
+      const planned = state.tasks.filter((x) => x.date === d);
+      const open = d === reviewDay;
+      const strip = h('button', {
+        class: 'strip' + (open ? ' open' : '') + (d === t ? ' today' : ''), role: 'tab', 'aria-selected': String(open),
+        'aria-label': plainDate(d) + '，专注 ' + minutes + ' 分钟，完成 ' + done.length + ' 项',
+        style: '--level:' + (minutes / max).toFixed(3),
+        onclick: () => {
+          reviewDay = d;
+          for (const other of box.children) { other.classList.toggle('open', other === strip); other.setAttribute('aria-selected', String(other === strip)); }
+        },
+      },
+        h('span', { class: 'strip-top' }, h('span', { class: 'strip-day' }, '一二三四五六日'[i]), h('span', { class: 'strip-min' }, minutes ? String(minutes) : '')),
+        // One character per line: a plain column reads upright in every browser.
+        h('span', { class: 'strip-name', 'aria-hidden': 'true' }, [...(d === t ? '今天' : '周' + '一二三四五六日'[i])].map((ch) => h('span', {}, ch))),
+        h('span', { class: 'strip-content' },
+          h('strong', {}, plainDate(d) + ' 周' + '一二三四五六日'[i] + (d === t ? '（今天）' : '')),
+          h('span', { class: 'strip-stats' },
+            h('span', {}, h('b', {}, minutesLabel(minutes)), '专注'),
+            h('span', {}, h('b', {}, String(mine.length)), '计时段'),
+            h('span', {}, h('b', {}, done.length + (planned.length ? ' / ' + planned.length : '')), planned.length ? '完成 / 安排' : '完成')),
+          done.length ? h('span', { class: 'strip-list' }, done.slice(0, 4).map((x) => h('span', {}, '✓ ' + x.title)), done.length > 4 ? h('span', { class: 'sub' }, '还有 ' + (done.length - 4) + ' 项') : null)
+            : h('span', { class: 'sub' }, d > t ? '这一天还没到。' : '这一天没有完成的任务记录。')));
+      box.append(strip);
+    });
+    return box;
+  }
   function renderReview() {
     const t = today();
     const start = C.weekStart(t);
@@ -826,12 +863,8 @@
               h('button', { class: 'icon-btn small', 'aria-label': '修改这条反思', title: '修改', onclick: () => openReflectionDialog(r) }, icon('gear'))),
             h('p', { class: 'reflection-text' }, r.text))))
             : h('p', { class: 'empty' }, '还没有反思。可以把写在本子上的反思拍照拖进聊天框，助手会读出文字并记录在这里。')),
-        h('section', { class: 'card' }, h('h3', {}, '每天的专注时间'),
-          h('div', { class: 'bars' }, days.map((d, i) => h('div', { class: 'bar' + (d === t ? ' today' : '') },
-            h('span', { class: 'bar-value' }, perDay[i] ? String(perDay[i]) : ''),
-            h('span', { class: 'bar-fill', style: 'height:' + (perDay[i] / max) * 100 + '%' }),
-            h('span', { class: 'sub' }, '一二三四五六日'[i])))),
-          h('p', { class: 'sub' }, '单位：分钟，来自计时记录。时间长短不代表学习效果。')),
+        h('section', { class: 'card' }, h('h3', {}, '这一周的每一天'), dayAccordion(days, sessions, max),
+          h('p', { class: 'sub' }, '点一天展开。竖条的高度是那天计时的专注时间，时间长短不代表学习效果。')),
         h('section', { class: 'card' }, h('h3', {}, '习惯'),
           state.habits.length ? h('div', { class: 'habit-grid' }, state.habits.map((habit) => h('div', { class: 'habit-line' },
             h('span', { class: 'task-title' }, habit.title),
