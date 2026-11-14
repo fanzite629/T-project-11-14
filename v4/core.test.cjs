@@ -305,3 +305,25 @@ test('each space has its own conversation history', () => {
   assert.deepEqual(C.buildContext(s, TODAY, 'x', null).history.map((m) => m.text), ['general']);
   assert.equal(C.buildContext(s, TODAY, 'x').history.length, 2);
 });
+
+test('spaces have a type; older data gets sensible types', () => {
+  assert.deepEqual(C.emptyState().spaces.map((x) => x.type), ['study', 'project', 'habit', 'life']);
+  const old = C.normalize({ spaces: [{ id: 'space_3', name: '习惯与健康', color: '#000' }, { id: 'space_x', name: '微机原理', color: '#000' }, { id: 'space_y', name: 'y', color: '#000', type: 'bogus' }] });
+  assert.deepEqual(old.spaces.map((x) => x.type), ['habit', 'study', 'study']);
+});
+
+test('a measurement keeps one value per day and reports first and latest to the model', () => {
+  let s = withProposal(C.emptyState(), [
+    { type: 'log_metric', name: '体重', value: '72.456', unit: 'kg', date: '2026-11-01', spaceId: 'space_3' },
+    { type: 'log_metric', name: '体重', value: 71.800, date: '2026-11-14', spaceId: 'space_3' },
+    { type: 'log_metric', name: '体重', value: 'abc' },
+  ]);
+  assert.equal(s.messages[0].proposal.actions.length, 2, 'a non-number is rejected');
+  s = C.resolveProposal(s, 'm1', true, new Date(TODAY + 'T08:00:00').getTime());
+  assert.equal(s.metrics.length, 1);
+  assert.deepEqual(s.metrics[0].entries, [{ date: '2026-11-01', value: 72.46 }, { date: '2026-11-14', value: 71.800 }]);
+  C.logMetric(s, { name: '体重', value: 71.500, spaceId: 'space_3', date: '2026-11-14' }, 0);
+  assert.equal(s.metrics[0].entries.length, 2, 'same day replaces');
+  const ctx = C.buildContext(s, TODAY, 'x');
+  assert.deepEqual(ctx.metrics, [{ name: '体重', unit: 'kg', space: '习惯与健康', count: 2, first: { date: '2026-11-01', value: 72.46 }, latest: { date: '2026-11-14', value: 71.500 } }]);
+});

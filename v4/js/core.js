@@ -10,6 +10,13 @@
   const MAX_STEPS = 12;
   const SPACE_COLORS = ['#E8825A', '#5B8DEF', '#4FA37A', '#B079D6', '#D9A441', '#4BA3B5'];
 
+  /* What a space is for. The type decides what the space shows first, not what it may contain. */
+  const SPACE_TYPES = [
+    { id: 'study', name: '学习 / 课程', hint: '以今天的学习任务为主，适合一门课或一类学习' },
+    { id: 'project', name: '项目', hint: '以目标和阶段为主，任务排在阶段下面' },
+    { id: 'habit', name: '习惯 / 健康', hint: '以每周打卡和数字记录（例如体重）为主' },
+    { id: 'life', name: '生活事务', hint: '一张简单的待办清单' },
+  ];
   const clone = (x) => JSON.parse(JSON.stringify(x));
   const isObject = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
   const uid = (prefix) => prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -40,12 +47,13 @@
     const names = ['学习', '项目', '习惯与健康', '生活'];
     return {
       version: VERSION,
-      spaces: names.map((name, i) => ({ id: 'space_' + (i + 1), name, color: SPACE_COLORS[i] })),
+      spaces: names.map((name, i) => ({ id: 'space_' + (i + 1), name, color: SPACE_COLORS[i], type: SPACE_TYPES[i].id })),
       tasks: [],
       habits: [],
       goals: [],
       sessions: [],
       reflections: [],
+      metrics: [],
       messages: [],
       memory: [],
       timer: null,
@@ -62,11 +70,18 @@
     if ((raw.version || 0) > VERSION) throw new Error('这是更新版本的数据，请使用新版软件打开');
     const base = emptyState();
     const s = { ...base, ...raw, version: VERSION };
-    for (const key of ['spaces', 'tasks', 'habits', 'goals', 'sessions', 'reflections', 'messages', 'memory']) if (!Array.isArray(s[key])) s[key] = base[key];
+    for (const key of ['spaces', 'tasks', 'habits', 'goals', 'sessions', 'reflections', 'metrics', 'messages', 'memory']) if (!Array.isArray(s[key])) s[key] = base[key];
     s.settings = { ...base.settings, ...(isObject(raw.settings) ? raw.settings : {}) };
     s.settings.agent = { ...base.settings.agent, ...(isObject(s.settings.agent) ? s.settings.agent : {}) };
     s.settings.prefs = { ...base.settings.prefs, ...(isObject(s.settings.prefs) ? s.settings.prefs : {}) };
+    // Spaces saved before types existed: the four built-in ones get their natural type, others the task-centred one.
+    const builtIn = { space_1: 'study', space_2: 'project', space_3: 'habit', space_4: 'life' };
+    for (const sp of s.spaces) if (!SPACE_TYPES.some((t) => t.id === sp.type)) sp.type = builtIn[sp.id] || 'study';
     const spaceIds = new Set(s.spaces.map((x) => x.id));
+    for (const m of s.metrics) {
+      if (!Array.isArray(m.entries)) m.entries = [];
+      if (!spaceIds.has(m.spaceId)) m.spaceId = null;
+    }
     const goalIds = new Set(s.goals.map((x) => x.id));
     for (const t of s.tasks) {
       if (!validDate(t.date)) t.date = null;
@@ -193,6 +208,13 @@
         if (!milestones.length) throw new Error('目标至少需要一个阶段');
         return { type: 'add_goal', title, deadline: validDate(a.deadline) ? a.deadline : null, spaceId, milestones };
       }
+      case 'log_metric': {
+        const name = cleanText(a.name, 30);
+        const value = Number(a.value);
+        if (!name) throw new Error('记录缺少名称');
+        if (!Number.isFinite(value) || Math.abs(value) > 1e7) throw new Error('记录的数值无效');
+        return { type: 'log_metric', name, value: Math.round(value * 100) / 100, unit: cleanText(a.unit, 10), date: validDate(a.date) ? a.date : null, spaceId: pickSpace(state, a) };
+      }
       case 'add_reflection': {
         // Line breaks are kept: a reflection is the user's own writing, often transcribed from a photo.
         const text = typeof a.text === 'string' ? a.text.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 4000) : '';
@@ -239,11 +261,26 @@
         s.tasks.push(task);
         created.push(task.id);
       }));
+    } else if (a.type === 'log_metric') {
+      logMetric(s, a, now);
     } else if (a.type === 'add_reflection') {
       s.reflections.push({ id: uid('r'), date: a.date || todayISO(new Date(now)), text: a.text, at: now, source: origin });
     } else if (a.type === 'remember') {
       addMemory(s, a.text, now, origin);
     }
+  }
+
+  /* One number per day for a named measurement (weight, sleep hours...). A second value on the same day replaces the first. */
+  function logMetric(s, a, now) {
+    let metric = s.metrics.find((m) => m.name === a.name && (m.spaceId || null) === (a.spaceId || null)) || s.metrics.find((m) => m.name === a.name);
+    if (!metric) {
+      metric = { id: uid('k'), name: a.name, unit: a.unit || '', spaceId: a.spaceId || null, entries: [] };
+      s.metrics.push(metric);
+    }
+    if (a.unit && !metric.unit) metric.unit = a.unit;
+    const date = a.date || todayISO(new Date(now));
+    metric.entries = metric.entries.filter((e) => e.date !== date).concat({ date, value: a.value }).sort((x, y) => x.date.localeCompare(y.date));
+    return metric;
   }
 
   function addMemory(s, text, now, source) {
@@ -459,6 +496,10 @@
       profile: buildProfile(state, today),
       memory: state.memory.map((m) => m.text),
       spaces: state.spaces.map((x) => x.name),
+      metrics: state.metrics.filter((m) => m.entries.length).map((m) => ({
+        name: m.name, unit: m.unit, space: spaceName(m.spaceId), count: m.entries.length,
+        first: m.entries[0], latest: m.entries[m.entries.length - 1],
+      })),
       goals: state.goals.map((g) => {
         const tasks = state.tasks.filter((t) => t.goalId === g.id);
         return { title: g.title, deadline: g.deadline, milestones: g.milestones.map((m) => m.title), tasksDone: tasks.filter((t) => t.done).length, tasksTotal: tasks.length };
@@ -554,7 +595,7 @@
   }
 
   return {
-    VERSION, SPACE_COLORS,
+    VERSION, SPACE_COLORS, SPACE_TYPES, logMetric,
     clone, uid, todayISO, validDate, addDays, weekStart,
     emptyState, normalize, validateActions, resolveProposal, editProposal, addMemory,
     habitWeekCount, timerElapsed, timerView, startTimer, pauseTimer, resumeTimer, extendTimer, finishStep, stopTimer,

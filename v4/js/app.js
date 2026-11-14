@@ -17,7 +17,7 @@
     const key = platform.loadKey(state.settings.agent.provider, state.settings.agent.provider);
     if (key) platform.saveKey(state.settings.agent.provider, key, state.settings.agent.provider);
   } catch { /* keys stay as they were */ }
-  const ui = { panelSection: 'review', space: null, tab: 'today', busy: false, busyText: '', draft: '', attachments: [], parsing: 0 };
+  const ui = { panelSection: 'review', space: null, tabs: {}, busy: false, busyText: '', draft: '', attachments: [], parsing: 0 };
   const library = new Map(); // files read during this session, by name; kept out of saved state because they are large
   let pip = null; // floating timer window, when open
   let dueNotified = null;
@@ -143,7 +143,7 @@
      The page is rebuilt on every change, so anything that should animate between two renders
      remembers its previous value here. */
   const fills = new Map(); // progress shown as a background fill, by item id
-  const openTrays = new Set(); // peek trays the user has opened
+  const trayState = new Map(); // peek trays the user has opened or closed, by key
   const openStacks = new Set(); // file stacks the user has fanned out
   let summaryOpen = false;
 
@@ -166,13 +166,14 @@
 
   /* A lighter tray tucked under an item. One line shows by default; a click slides the rest out
      while the item above stays where it is. */
-  function tray(key, summary, body) {
-    const open = openTrays.has(key);
+  function tray(key, summary, body, startOpen = false) {
+    const isOpen = () => (trayState.has(key) ? trayState.get(key) : startOpen);
+    const open = isOpen();
     const el = h('div', { class: 'tray' + (open ? ' open' : '') });
     el.append(
       h('button', { class: 'tray-peek', 'aria-expanded': String(open), onclick: (e) => {
-        const now = !openTrays.has(key);
-        if (now) openTrays.add(key); else openTrays.delete(key);
+        const now = !isOpen();
+        trayState.set(key, now);
         el.classList.toggle('open', now);
         e.currentTarget.setAttribute('aria-expanded', String(now));
       } }, h('span', { class: 'tray-summary' }, summary), icon('up')),
@@ -210,6 +211,12 @@
     { key: 'bestTime', text: '一天中什么时候效率最高？', options: [['早上', '早上'], ['下午', '下午'], ['晚上', '晚上'], ['深夜', '深夜']] },
   ];
   const STARTERS = ['帮我规划今天', '我现在有 2 小时，想学习一份课件', '我有一个大目标，帮我拆开'];
+  const STARTERS_BY_TYPE = {
+    study: ['帮我安排今天的学习', '我现在有 2 小时，想学习一份课件', '帮我定一个这门课的目标'],
+    project: ['帮我把这个项目拆成几个阶段', '这周这个项目该做什么？', '我卡住了，帮我找下一步'],
+    habit: ['我想养成一个新习惯', '记录今天的体重', '看看我这周的打卡情况'],
+    life: ['帮我记几件要办的事', '这周有哪些事要办？', '提醒我下周要交的东西'],
+  };
   const askOnboarding = (s, index) => say(s, ONBOARDING[index].text, { options: ONBOARDING[index].options.map(([label, value]) => ({ label, pref: { index, value } })) });
   function answerOnboarding(option) {
     change((s) => {
@@ -237,14 +244,16 @@
   }
 
   /* ---------- list: tasks, habits, goals ---------- */
-  function visibleTasks() {
+  function visibleTasks(tab) {
     const t = today();
     const weekEnd = C.addDays(C.weekStart(t), 6);
-    return state.tasks
-      .filter((x) => !ui.space || x.spaceId === ui.space)
+    const mine = state.tasks.filter((x) => !ui.space || x.spaceId === ui.space);
+    if (tab === 'done') return mine.filter((x) => x.done).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0)).slice(0, 60);
+    return mine
       .filter((x) => {
-        if (ui.tab === 'today') return x.date && (x.date === t || (x.date < t && !x.done));
-        if (ui.tab === 'week') return x.date && x.date > t && x.date <= weekEnd;
+        if (tab === 'todo') return !x.done;
+        if (tab === 'today') return x.date && (x.date === t || (x.date < t && !x.done));
+        if (tab === 'week') return x.date && x.date > t && x.date <= weekEnd;
         return !x.date || x.date > weekEnd;
       })
       .sort((a, b) => a.done - b.done || (a.date || '9999').localeCompare(b.date || '9999') || a.createdAt - b.createdAt);
@@ -289,7 +298,7 @@
         h('span', { class: 'task-meta' }, '本周 ' + count + ' / ' + habit.perWeek)));
     return fill(row, habit.id, count / habit.perWeek, (space(habit.spaceId) || {}).color);
   }
-  function goalCard(goal) {
+  function goalCard(goal, startOpen = false) {
     const tasks = state.tasks.filter((t) => t.goalId === goal.id);
     const done = tasks.filter((t) => t.done).length;
     const stages = goal.milestones.map((m, index) => {
@@ -307,7 +316,7 @@
     fill(card, goal.id, tasks.length ? done / tasks.length : 0, (space(goal.spaceId) || {}).color);
     return h('div', { class: 'with-tray' }, card,
       tray('goal:' + goal.id, current ? '现在：' + current.title + ' · ' + current.done + '/' + current.total : '全部阶段已完成',
-        h('ol', { class: 'milestones' }, stages.map((m) => h('li', { class: m.total > 0 && m.done === m.total ? 'done' : '' }, h('span', {}, m.title), h('span', { class: 'sub' }, m.done + '/' + m.total))))));
+        h('ol', { class: 'milestones' }, stages.map((m) => h('li', { class: m.total > 0 && m.done === m.total ? 'done' : '' }, h('span', {}, m.title), h('span', { class: 'sub' }, m.done + '/' + m.total)))), startOpen));
   }
 
   /* Today's key numbers, shown in the capsule and the pull-down panel. */
@@ -380,18 +389,128 @@
     return box;
   }
 
+  /* A habit with the whole week visible: any day up to today can be ticked. */
+  function habitWeekRow(habit) {
+    const t = today();
+    const start = C.weekStart(t);
+    const count = C.habitWeekCount(habit, t);
+    const row = h('div', { class: 'habit week' },
+      h('button', { class: 'task-body', onclick: () => openHabitDialog(habit) },
+        h('span', { class: 'task-title' }, habit.title),
+        h('span', { class: 'task-meta' }, '本周 ' + count + ' / ' + habit.perWeek)),
+      h('div', { class: 'week-cells' }, Array.from({ length: 7 }, (_, i) => {
+        const d = C.addDays(start, i);
+        const on = !!habit.log[d];
+        return h('button', {
+          class: 'day-cell' + (on ? ' on' : '') + (d === t ? ' today' : ''), disabled: d > t, 'aria-pressed': String(on),
+          'aria-label': habit.title + '，周' + '一二三四五六日'[i] + (on ? '，已完成' : '，未完成'), title: plainDate(d),
+          onclick: () => change((s) => { const x = s.habits.find((y) => y.id === habit.id); if (x.log[d]) delete x.log[d]; else x.log[d] = true; }),
+        }, '一二三四五六日'[i]);
+      })));
+    return fill(row, habit.id, count / habit.perWeek, (space(habit.spaceId) || {}).color);
+  }
+  /* A measurement: latest value, change since the first entry, a small trend line, and a box to log today's number. */
+  function metricCard(metric) {
+    const entries = metric.entries;
+    const latest = entries[entries.length - 1];
+    const unit = metric.unit ? ' ' + metric.unit : '';
+    const delta = entries.length > 1 ? Math.round((latest.value - entries[0].value) * 100) / 100 : null;
+    const input = h('input', { class: 'metric-input', type: 'number', step: 'any', inputMode: 'decimal', placeholder: '今天的' + metric.name, 'aria-label': '记录今天的' + metric.name,
+      onkeydown: (e) => { if (e.key === 'Enter') log(); } });
+    const log = () => {
+      const value = Number(input.value);
+      if (input.value.trim() === '' || !Number.isFinite(value)) return toast('请输入一个数字');
+      change((s) => C.logMetric(s, { name: metric.name, value: Math.round(value * 100) / 100, spaceId: metric.spaceId, date: null }, Date.now()));
+    };
+    let line = null;
+    if (entries.length > 1) {
+      const values = entries.slice(-30).map((e) => e.value);
+      const low = Math.min(...values);
+      const span = Math.max(...values) - low || 1;
+      const points = values.map((v, i) => ((i / (values.length - 1)) * 116 + 2).toFixed(1) + ',' + (26 - ((v - low) / span) * 24).toFixed(1)).join(' ');
+      line = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      line.setAttribute('viewBox', '0 0 120 28');
+      line.setAttribute('class', 'spark');
+      line.setAttribute('role', 'img');
+      line.setAttribute('aria-label', metric.name + '最近 ' + values.length + ' 次记录的变化');
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+      path.setAttribute('points', points);
+      line.append(path);
+    }
+    return h('div', { class: 'metric' },
+      h('div', { class: 'metric-head' },
+        h('div', {}, h('span', { class: 'task-meta' }, metric.name + (latest ? ' · ' + dateLabel(latest.date) : '')),
+          h('strong', { class: 'metric-value' }, latest ? latest.value + unit : '还没有记录')),
+        line,
+        h('button', { class: 'icon-btn small', 'aria-label': '删除记录项 ' + metric.name, title: '删除这个记录项', onclick: () => {
+          if (confirm('删除「' + metric.name + '」和它的全部 ' + entries.length + ' 条记录？')) change((s) => { s.metrics = s.metrics.filter((m) => m.id !== metric.id); });
+        } }, icon('trash'))),
+      delta !== null ? h('span', { class: 'sub' }, '从 ' + plainDate(entries[0].date) + ' 的 ' + entries[0].value + unit + ' 到现在：' + (delta > 0 ? '+' : '') + delta + unit + '，共 ' + entries.length + ' 次记录') : null,
+      h('div', { class: 'row tight' }, input, h('button', { class: 'btn outline slim', onclick: log }, '记录')));
+  }
+  function openMetricDialog() {
+    const form = openDialog('新记录项', [
+      field('记录什么（例如体重、睡眠）', h('input', { name: 'name', maxLength: 30, required: true })),
+      field('单位（可以不填）', h('input', { name: 'unit', maxLength: 10, placeholder: 'kg、小时…' })),
+    ], [
+      h('span', { class: 'grow' }), cancelButton(),
+      h('button', { class: 'btn dark', onclick: () => {
+        const name = form.name.value.trim();
+        if (!name) return toast('请填写名称');
+        if (state.metrics.some((m) => m.name === name && (m.spaceId || null) === ui.space)) return toast('已经有同名的记录项');
+        if (change((s) => s.metrics.push({ id: C.uid('k'), name, unit: form.unit.value.trim(), spaceId: ui.space, entries: [] }))) closeDialog();
+      } }, '保存'),
+    ]);
+    form.name.focus();
+  }
+
+  /* What each kind of space shows, and in which order. "all" is the overview across spaces. */
+  const TABS = {
+    all: [['today', '今天'], ['week', '本周'], ['later', '之后'], ['goals', '目标']],
+    study: [['today', '今天'], ['week', '本周'], ['later', '之后'], ['goals', '目标']],
+    project: [['goals', '目标'], ['today', '今天'], ['week', '本周'], ['later', '之后']],
+    habit: [['checkin', '打卡'], ['today', '任务'], ['goals', '目标']],
+    life: [['todo', '待办'], ['done', '已完成']],
+  };
   function renderList() {
-    const tabs = [['today', '今天'], ['week', '本周'], ['later', '之后'], ['goals', '目标']];
     const current = space(ui.space);
+    const type = current ? current.type : 'all';
+    const tabs = TABS[type];
+    const tab = tabs.some(([key]) => key === ui.tabs[type]) ? ui.tabs[type] : tabs[0][0];
     const inSpace = (x) => !ui.space || x.spaceId === ui.space;
-    const tasks = ui.tab === 'goals' ? [] : visibleTasks();
     const habits = state.habits.filter(inSpace);
     const goals = state.goals.filter(inSpace);
-    const empty = { today: '今天还没有安排。告诉助手你想做什么，或者拖一份课件进来。', week: '本周后面几天还没有安排。', later: '没有以后的任务或未定日期的任务。' }[ui.tab];
-    const body = ui.tab === 'goals'
-      ? (goals.length ? goals.map(goalCard) : h('p', { class: 'empty' }, '还没有目标。在聊天里说「我想在 12 月底前学完单片机」，助手会拆成每周和每天的任务。'))
-      : [tasks.length ? tasks.map(taskRow) : h('p', { class: 'empty' }, empty),
-        ui.tab === 'today' && habits.length ? [h('h3', { class: 'group-title' }, '习惯'), ...habits.map(habitRow)] : null];
+    const metrics = state.metrics.filter((m) => (m.spaceId || null) === ui.space);
+    const button = (cls, label, onclick) => h('button', { class: 'btn ' + cls, onclick }, icon('plus'), label);
+    const emptyText = { today: '今天还没有安排。告诉助手你想做什么，或者拖一份课件进来。', week: '本周后面几天还没有安排。', later: '没有以后的任务或未定日期的任务。', todo: '没有待办的事。在上面写一件，按回车就加进来。', done: '还没有完成的事。' };
+    let body;
+    if (tab === 'goals') {
+      body = goals.length ? goals.map((g) => goalCard(g, type === 'project'))
+        : h('p', { class: 'empty' }, type === 'project' ? '这个项目还没有目标。在聊天里说说这个项目要做成什么、什么时候要，助手会拆成阶段和任务。' : '还没有目标。在聊天里说「我想在 12 月底前学完单片机」，助手会拆成每周和每天的任务。');
+    } else if (tab === 'checkin') {
+      body = [
+        h('h3', { class: 'group-title' }, '本周打卡'),
+        habits.length ? habits.map(habitWeekRow) : h('p', { class: 'empty' }, '还没有习惯。点下面的「新习惯」，或者在聊天里说「我想每周运动三次」。'),
+        h('h3', { class: 'group-title' }, '数字记录'),
+        metrics.length ? metrics.map(metricCard) : h('p', { class: 'empty' }, '体重、睡眠这类数字可以记在这里，看它怎么变化。点下面的「新记录项」，或者在聊天里说「今天体重 72 公斤」。'),
+      ];
+    } else {
+      const tasks = visibleTasks(tab);
+      const quick = tab === 'todo' ? h('input', { class: 'quick-add', placeholder: '写一件要办的事，按回车', maxLength: 150, 'aria-label': '添加待办',
+        onkeydown: (e) => {
+          if (e.key !== 'Enter' || e.isComposing || !e.target.value.trim()) return;
+          const title = e.target.value.trim();
+          change((s) => s.tasks.push({ id: C.uid('t'), title, date: null, minutes: 30, spaceId: ui.space, done: false, doneAt: null, createdAt: Date.now(), origin: 'user' }));
+          const again = $('.quick-add');
+          if (again) again.focus();
+        } }) : null;
+      body = [quick, tasks.length ? tasks.map(taskRow) : h('p', { class: 'empty' }, emptyText[tab]),
+        tab === 'today' && type !== 'habit' && habits.length ? [h('h3', { class: 'group-title' }, '习惯'), ...habits.map(habitRow)] : null];
+    }
+    const foot = type === 'habit' ? [button('outline', '新习惯', () => openHabitDialog(null)), button('ghost', '新记录项', openMetricDialog)]
+      : type === 'life' ? [button('outline', '新建任务', () => openTaskDialog(null))]
+        : type === 'project' ? [button('outline', '新建任务', () => openTaskDialog(null))]
+          : [button('outline', '新建任务', () => openTaskDialog(null)), button('ghost', '新习惯', () => openHabitDialog(null))];
     $('#list').style.setProperty('--dim', summaryOpen ? '1' : '0');
     $('#list').replaceChildren(
       h('header', { class: 'list-head' },
@@ -399,11 +518,9 @@
         current ? h('button', { class: 'icon-btn', 'aria-label': '编辑分区', title: '编辑分区', onclick: () => openSpaceDialog(current) }, icon('gear')) : null),
       summary(todayNumbers(inSpace)),
       h('div', { class: 'segmented', role: 'tablist' }, tabs.map(([key, label]) =>
-        h('button', { role: 'tab', 'aria-selected': String(ui.tab === key), class: ui.tab === key ? 'on' : '', onclick: () => { ui.tab = key; render(); } }, label))),
+        h('button', { role: 'tab', 'aria-selected': String(tab === key), class: tab === key ? 'on' : '', onclick: () => { ui.tabs[type] = key; render(); } }, label))),
       h('div', { class: 'list-scroll' }, body),
-      h('div', { class: 'list-foot' },
-        h('button', { class: 'btn outline', onclick: () => openTaskDialog(null) }, icon('plus'), '新建任务'),
-        h('button', { class: 'btn ghost', onclick: () => openHabitDialog(null) }, icon('plus'), '新习惯')));
+      h('div', { class: 'list-foot' }, foot));
   }
 
   /* ---------- chat ---------- */
@@ -464,6 +581,7 @@
           onchange: (e) => { try { commit(C.editProposal(state, message.id, index, { kind: 'text', text: e.target.value })); } catch (error) { toast(error.message); } } })
         : h('p', { class: 'reflection-text' }, a.text));
     }
+    if (a.type === 'log_metric') return line('记录', a.name + ' ' + a.value + (a.unit ? ' ' + a.unit : ''), a.date ? dateLabel(a.date) : '今天');
     return line('记住', a.text);
   }
   function proposalCard(message) {
@@ -555,7 +673,7 @@
       !thread.length && !ui.busy ? h('div', { class: 'welcome' },
         h('h3', {}, space(ui.space) ? '在「' + space(ui.space).name + '」里想推进什么？' : (state.settings.prefs.name ? state.settings.prefs.name + '，' : '') + '今天想推进什么？'),
         h('p', { class: 'sub' }, '告诉我你的任务、目标或者困难，也可以把课件、图片拖进来。我会先看你的安排和记录，再提出修改，你确认之后才会写入。'),
-        h('div', { class: 'starters' }, STARTERS.map((text) => h('button', { class: 'pill soft', onclick: () => send(text) }, text)))) : null,
+        h('div', { class: 'starters' }, (space(ui.space) ? STARTERS_BY_TYPE[space(ui.space).type] : STARTERS).map((text) => h('button', { class: 'pill soft', onclick: () => send(text) }, text)))) : null,
       ui.busy ? h('div', { class: 'msg theirs' }, h('div', { class: 'bubble typing', role: 'status' }, h('i'), h('i'), h('i'), ui.busyText ? h('span', { class: 'sub' }, ui.busyText) : null)) : null);
     const input = h('textarea', {
       id: 'composer', rows: 2, maxLength: 4000, value: ui.draft,
@@ -633,7 +751,7 @@
     }
     const threadSpace = ui.space; // fixed now: the reply belongs to the conversation it was asked in, even if the user switches space meanwhile
     const context = C.buildContext(state, today(), text, threadSpace);
-    if (threadSpace) context.currentSpace = space(threadSpace).name;
+    if (threadSpace) { context.currentSpace = space(threadSpace).name; context.currentSpaceType = space(threadSpace).type; }
     const sent = { id: C.uid('msg'), role: 'user', text, at: Date.now(), spaceId: threadSpace };
     if (attachments.length) sent.attachments = attachments.map((f) => ({ name: f.name, kind: f.kind, units: f.units, ...(f.thumb ? { thumb: f.thumb } : {}) }));
     if (!change((s) => s.messages.push(sent))) return;
@@ -902,7 +1020,7 @@
     const form = openDialog(task ? '编辑任务' : '新建任务', [
       field('要做什么', h('input', { name: 'title', maxLength: 150, required: true, value: task ? task.title : '' })),
       h('div', { class: 'row' },
-        field('日期（可以留空）', h('input', { name: 'date', type: 'date', value: task ? task.date || '' : ui.tab === 'today' ? today() : '' })),
+        field('日期（可以留空）', h('input', { name: 'date', type: 'date', value: task ? task.date || '' : (space(ui.space) || {}).type === 'life' ? '' : today() })),
         field('预计分钟', h('input', { name: 'minutes', type: 'number', min: 1, max: 1440, value: task ? task.minutes : 30, disabled: !!(task && task.steps) }))),
       field('分区', spaceSelect(task ? task.spaceId : ui.space)),
       task && task.steps ? h('div', { class: 'field' }, h('span', {}, '分段（计时会按这个顺序进行）'),
@@ -958,6 +1076,7 @@
         onclick: (e) => { color = c; swatches.querySelectorAll('.swatch').forEach((x) => x.classList.remove('on')); e.currentTarget.classList.add('on'); } })));
     const form = openDialog(current ? '编辑分区' : '新分区', [
       field('名称（例如一门课、一个项目）', h('input', { name: 'name', maxLength: 20, required: true, value: current ? current.name : '' })),
+      field('这个分区用来做什么', h('select', { name: 'type' }, C.SPACE_TYPES.map((t) => h('option', { value: t.id, selected: t.id === (current ? current.type : 'study') }, t.name + '：' + t.hint)))),
       field('颜色', swatches),
     ], [
       current ? h('button', { type: 'button', class: 'btn danger', onclick: () => {
@@ -972,8 +1091,8 @@
         if (!name) return toast('请填写分区名称');
         if (state.spaces.some((x) => x.name === name && x !== current)) return toast('已经有同名分区');
         const ok = change((s) => {
-          if (current) Object.assign(s.spaces.find((x) => x.id === current.id), { name, color });
-          else s.spaces.push({ id: C.uid('space'), name, color });
+          if (current) Object.assign(s.spaces.find((x) => x.id === current.id), { name, color, type: form.type.value });
+          else s.spaces.push({ id: C.uid('space'), name, color, type: form.type.value });
         });
         if (ok) closeDialog();
       } }, '保存'),
