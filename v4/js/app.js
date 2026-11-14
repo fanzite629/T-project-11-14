@@ -134,6 +134,70 @@
     h('span', { class: 'file-name' }, f.name), h('span', { class: 'sub' }, f.kind + ' · ' + f.units),
     onRemove ? h('button', { class: 'chip-x', 'aria-label': '移除 ' + f.name, onclick: onRemove }, icon('close')) : null);
 
+  /* ---------- interaction patterns ----------
+     The page is rebuilt on every change, so anything that should animate between two renders
+     remembers its previous value here. */
+  const fills = new Map(); // progress shown as a background fill, by item id
+  const openTrays = new Set(); // peek trays the user has opened
+  const openStacks = new Set(); // file stacks the user has fanned out
+  let summaryOpen = false;
+
+  /* Progress as the item's own background: fills from the left, and glows once on reaching 100%. */
+  function fill(el, key, value, color) {
+    const target = Math.max(0, Math.min(1, value || 0));
+    const from = fills.has(key) ? fills.get(key) : target;
+    fills.set(key, target);
+    el.classList.add('fillable');
+    el.style.setProperty('--p', String(from));
+    if (color) el.style.setProperty('--fill', 'color-mix(in srgb, ' + color + ' 20%, transparent)');
+    if (from !== target) {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        el.style.setProperty('--p', String(target));
+        if (target >= 1) el.classList.add('glow');
+      }));
+    }
+    return el;
+  }
+
+  /* A lighter tray tucked under an item. One line shows by default; a click slides the rest out
+     while the item above stays where it is. */
+  function tray(key, summary, body) {
+    const open = openTrays.has(key);
+    const el = h('div', { class: 'tray' + (open ? ' open' : '') });
+    el.append(
+      h('button', { class: 'tray-peek', 'aria-expanded': String(open), onclick: (e) => {
+        const now = !openTrays.has(key);
+        if (now) openTrays.add(key); else openTrays.delete(key);
+        el.classList.toggle('open', now);
+        e.currentTarget.setAttribute('aria-expanded', String(now));
+      } }, h('span', { class: 'tray-summary' }, summary), icon('up')),
+      h('div', { class: 'tray-body' }, h('div', { class: 'tray-inner' }, body)));
+    return el;
+  }
+
+  /* Files of a sent message as overlapping circles. A click fans them out one after another with their names. */
+  const FILE_COLORS = { PDF: '#E8825A', Word: '#5B8DEF', PPT: '#D9A441', Excel: '#4FA37A', 图片: '#B079D6', 文本: '#4BA3B5' };
+  function fileStack(key, files) {
+    const open = openStacks.has(key);
+    const shown = Math.min(files.length, 4);
+    const el = h('button', {
+      class: 'stack' + (open ? ' open' : ''), 'aria-expanded': String(open), 'aria-label': files.length + ' 个文件：' + files.map((f) => f.name).join('、'),
+      style: '--n:' + files.length,
+      onclick: () => {
+        const now = !openStacks.has(key);
+        if (now) openStacks.add(key); else openStacks.delete(key);
+        el.classList.toggle('open', now);
+        el.setAttribute('aria-expanded', String(now));
+      },
+    });
+    files.forEach((f, i) => el.append(h('span', { class: 'stack-item' + (i >= shown ? ' extra' : ''), style: '--i:' + i },
+      f.thumb ? h('img', { class: 'stack-face', src: f.thumb, alt: '' })
+        : h('span', { class: 'stack-face', style: 'background:' + (FILE_COLORS[f.kind] || '#8a8f9c') }, (f.name.split('.').pop() || f.kind).slice(0, 4).toUpperCase()),
+      h('span', { class: 'stack-name' }, f.name))));
+    if (files.length > shown) el.append(h('span', { class: 'stack-item more', style: '--i:' + shown }, h('span', { class: 'stack-face' }, '+' + (files.length - shown))));
+    return el;
+  }
+
   /* ---------- first-run interview: three questions answered by clicking ---------- */
   const ONBOARDING = [
     { key: 'segment', text: '你好，我是你的规划助手。先问三个小问题，点一下就行。\n\n你一次能专注多久？', options: [['15 分钟', 15], ['25 分钟', 25], ['30 分钟', 30], ['45 分钟', 45]] },
@@ -180,11 +244,14 @@
       })
       .sort((a, b) => a.done - b.done || (a.date || '9999').localeCompare(b.date || '9999') || a.createdAt - b.createdAt);
   }
+  const stepLines = (steps) => h('ol', { class: 'steps' }, steps.map((x, i) => h('li', { class: x.done ? 'done' : '' },
+    h('span', { class: 'num' }, i + 1 + '.'), h('span', { class: 'step-title' }, x.title), h('span', { class: 'sub' }, x.minutes + ' 分'))));
   function taskRow(t) {
     const sp = space(t.spaceId);
     const overdue = !t.done && t.date && t.date < today();
     const timing = state.timer && state.timer.taskId === t.id;
-    return h('div', { class: 'task' + (t.done ? ' done' : '') + (timing ? ' timing' : '') },
+    const stepsDone = t.steps ? t.steps.filter((x) => x.done).length : 0;
+    const row = h('div', { class: 'task' + (t.done ? ' done' : '') + (timing ? ' timing' : '') },
       h('button', {
         class: 'check', 'aria-label': t.done ? '标记为未完成' : '标记为完成', 'aria-pressed': String(t.done),
         onclick: () => change((s) => { const x = s.tasks.find((y) => y.id === t.id); x.done = !x.done; x.doneAt = x.done ? Date.now() : null; if (x.done && s.timer && s.timer.taskId === x.id) s.timer = null; }),
@@ -195,40 +262,119 @@
           sp ? h('span', { class: 'dot', style: 'background:' + sp.color }) : null,
           h('span', { class: overdue ? 'overdue' : '' }, overdue ? '已过期 · ' + dateLabel(t.date) : dateLabel(t.date)),
           h('span', {}, '· ' + minutesLabel(t.minutes)),
-          t.steps ? h('span', {}, '· ' + t.steps.filter((x) => x.done).length + '/' + t.steps.length + ' 段') : null)),
+          t.steps ? h('span', {}, '· ' + stepsDone + '/' + t.steps.length + ' 段') : null)),
       !t.done && !state.timer ? h('button', { class: 'play', 'aria-label': '开始计时：' + t.title, title: '开始计时', onclick: () => beginTimer(t.id) }, icon('play')) : null);
+    fill(row, t.id, t.done ? 1 : t.steps ? stepsDone / t.steps.length : 0, sp && sp.color);
+    if (!t.steps || t.steps.length < 2) return row;
+    const next = t.steps.find((x) => !x.done);
+    return h('div', { class: 'with-tray' }, row,
+      tray('task:' + t.id, next ? '下一段：' + next.title + ' · ' + next.minutes + ' 分' : '全部 ' + t.steps.length + ' 段已完成', stepLines(t.steps)));
   }
   function habitRow(habit) {
     const t = today();
     const count = C.habitWeekCount(habit, t);
     const done = !!habit.log[t];
-    return h('div', { class: 'habit' },
+    const row = h('div', { class: 'habit' },
       h('button', {
         class: 'check round' + (done ? ' on' : ''), 'aria-label': '今天' + (done ? '已完成' : '未完成') + '：' + habit.title, 'aria-pressed': String(done),
         onclick: () => change((s) => { const x = s.habits.find((y) => y.id === habit.id); if (x.log[t]) delete x.log[t]; else x.log[t] = true; }),
       }, done ? icon('check') : null),
       h('button', { class: 'task-body', onclick: () => openHabitDialog(habit) },
         h('span', { class: 'task-title' }, habit.title),
-        h('span', { class: 'task-meta' }, '本周 ' + count + ' / ' + habit.perWeek)),
-      h('span', { class: 'meter', 'aria-hidden': 'true' }, h('span', { style: 'width:' + Math.min(100, (count / habit.perWeek) * 100) + '%' })));
+        h('span', { class: 'task-meta' }, '本周 ' + count + ' / ' + habit.perWeek)));
+    return fill(row, habit.id, count / habit.perWeek, (space(habit.spaceId) || {}).color);
   }
   function goalCard(goal) {
     const tasks = state.tasks.filter((t) => t.goalId === goal.id);
     const done = tasks.filter((t) => t.done).length;
-    return h('div', { class: 'goal' },
+    const stages = goal.milestones.map((m, index) => {
+      const mine = tasks.filter((t) => t.milestone === index);
+      return { title: m.title, done: mine.filter((t) => t.done).length, total: mine.length };
+    });
+    const current = stages.find((m) => m.total === 0 || m.done < m.total);
+    const card = h('div', { class: 'goal' },
       h('div', { class: 'goal-head' },
         h('strong', {}, goal.title),
         h('button', { class: 'icon-btn small', 'aria-label': '删除目标', title: '删除目标', onclick: () => {
           if (confirm('删除目标「' + goal.title + '」？它的任务会保留。')) commit(C.normalize({ ...C.clone(state), goals: state.goals.filter((g) => g.id !== goal.id) }));
         } }, icon('trash'))),
-      h('span', { class: 'task-meta' }, (goal.deadline ? '截止 ' + plainDate(goal.deadline) + ' · ' : '') + done + ' / ' + tasks.length + ' 项完成'),
-      h('span', { class: 'meter wide', 'aria-hidden': 'true' }, h('span', { style: 'width:' + (tasks.length ? (done / tasks.length) * 100 : 0) + '%' })),
-      h('ol', { class: 'milestones' }, goal.milestones.map((m, index) => {
-        const mine = tasks.filter((t) => t.milestone === index);
-        const finished = mine.length > 0 && mine.every((t) => t.done);
-        return h('li', { class: finished ? 'done' : '' }, h('span', {}, m.title), h('span', { class: 'sub' }, mine.filter((t) => t.done).length + '/' + mine.length));
-      })));
+      h('span', { class: 'task-meta' }, (goal.deadline ? '截止 ' + plainDate(goal.deadline) + ' · ' : '') + done + ' / ' + tasks.length + ' 项完成'));
+    fill(card, goal.id, tasks.length ? done / tasks.length : 0, (space(goal.spaceId) || {}).color);
+    return h('div', { class: 'with-tray' }, card,
+      tray('goal:' + goal.id, current ? '现在：' + current.title + ' · ' + current.done + '/' + current.total : '全部阶段已完成',
+        h('ol', { class: 'milestones' }, stages.map((m) => h('li', { class: m.total > 0 && m.done === m.total ? 'done' : '' }, h('span', {}, m.title), h('span', { class: 'sub' }, m.done + '/' + m.total))))));
   }
+
+  /* Today's key numbers, shown in the capsule and the pull-down panel. */
+  function todayNumbers(inSpace) {
+    const t = today();
+    const week = C.weekStart(t);
+    const dated = state.tasks.filter((x) => inSpace(x) && x.date === t);
+    const sessions = state.sessions.filter((x) => inSpace(x));
+    const minutes = (list) => list.reduce((n, x) => n + x.actual, 0);
+    const habits = state.habits.filter(inSpace);
+    return {
+      done: state.tasks.filter((x) => inSpace(x) && x.done && x.doneAt && C.todayISO(new Date(x.doneAt)) === t).length,
+      focus: minutes(sessions.filter((x) => x.date === t)),
+      rate: dated.length ? Math.round((dated.filter((x) => x.done).length / dated.length) * 100) : null,
+      left: state.tasks.filter((x) => inSpace(x) && !x.done && x.date && x.date <= t),
+      weekFocus: minutes(sessions.filter((x) => x.date >= week)),
+      habitsDone: habits.filter((x) => x.log[t]).length, habits: habits.length,
+      overdue: state.tasks.filter((x) => inSpace(x) && !x.done && x.date && x.date < t).length,
+    };
+  }
+  /* The capsule opens into a panel by clicking it or by pulling it down; the list below is pushed down and dimmed. */
+  function summary(n) {
+    const short = (m) => (m >= 60 ? Math.floor(m / 60) + 'h ' + (m % 60) + 'm' : m + 'm');
+    const cell = (value, label) => h('div', { class: 'sum-cell' }, h('strong', {}, value), h('span', { class: 'sub' }, label));
+    const capsule = h('button', { class: 'capsule', 'aria-expanded': String(summaryOpen), title: '点一下或往下拉，展开今天的统计' },
+      h('span', {}, icon('check'), n.done + ' 完成'), h('span', {}, icon('brain'), short(n.focus)), h('span', {}, n.rate === null ? '今天无安排' : n.rate + '%'));
+    const panel = h('div', { class: 'sum-panel' }, h('div', { class: 'sum-grid' },
+      cell(String(n.left.length), '今天还剩（项）'), cell(minutesLabel(n.left.reduce((a, x) => a + x.minutes, 0)), '还需要的时间'),
+      cell(minutesLabel(n.weekFocus), '本周专注'), cell(n.habits ? n.habitsDone + ' / ' + n.habits : '—', '今天的习惯'),
+      cell(String(n.overdue), '已过期（项）'), cell(n.rate === null ? '—' : n.rate + '%', '今天完成率')));
+    const box = h('div', { class: 'summary' + (summaryOpen ? ' open' : ''), style: '--open:' + (summaryOpen ? 1 : 0) }, capsule, panel);
+    const set = (value, dragging) => {
+      box.style.setProperty('--open', String(value));
+      box.classList.toggle('dragging', !!dragging);
+      box.parentElement.style.setProperty('--dim', String(value));
+    };
+    const settle = (value) => {
+      summaryOpen = value;
+      box.classList.toggle('open', value);
+      capsule.setAttribute('aria-expanded', String(value));
+      set(value ? 1 : 0, false);
+    };
+    const drag = (e) => {
+      if (e.button) return;
+      const startY = e.clientY;
+      const from = summaryOpen ? 1 : 0;
+      const height = panel.firstElementChild.offsetHeight || 1;
+      let moved = false;
+      let value = from;
+      const target = e.currentTarget;
+      target.setPointerCapture(e.pointerId);
+      const move = (ev) => {
+        const dy = ev.clientY - startY;
+        if (Math.abs(dy) > 4) moved = true;
+        value = Math.max(0, Math.min(1, from + dy / height));
+        if (moved) set(value, true);
+      };
+      const stop = () => {
+        target.removeEventListener('pointermove', move);
+        settle(moved ? value > 0.4 : !summaryOpen);
+      };
+      target.addEventListener('pointermove', move);
+      target.addEventListener('pointerup', stop, { once: true });
+      target.addEventListener('pointercancel', stop, { once: true });
+    };
+    requestAnimationFrame(() => box.style.setProperty('--h', panel.firstElementChild.offsetHeight + 'px'));
+    capsule.addEventListener('pointerdown', drag);
+    panel.addEventListener('pointerdown', drag);
+    capsule.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); settle(!summaryOpen); } });
+    return box;
+  }
+
   function renderList() {
     const tabs = [['today', '今天'], ['week', '本周'], ['later', '之后'], ['goals', '目标']];
     const current = space(ui.space);
@@ -236,18 +382,17 @@
     const tasks = ui.tab === 'goals' ? [] : visibleTasks();
     const habits = state.habits.filter(inSpace);
     const goals = state.goals.filter(inSpace);
-    const open = state.tasks.filter((x) => inSpace(x) && !x.done && x.date && x.date <= today());
     const empty = { today: '今天还没有安排。告诉助手你想做什么，或者拖一份课件进来。', week: '本周后面几天还没有安排。', later: '没有以后的任务或未定日期的任务。' }[ui.tab];
     const body = ui.tab === 'goals'
       ? (goals.length ? goals.map(goalCard) : h('p', { class: 'empty' }, '还没有目标。在聊天里说「我想在 12 月底前学完单片机」，助手会拆成每周和每天的任务。'))
       : [tasks.length ? tasks.map(taskRow) : h('p', { class: 'empty' }, empty),
         ui.tab === 'today' && habits.length ? [h('h3', { class: 'group-title' }, '习惯'), ...habits.map(habitRow)] : null];
+    $('#list').style.setProperty('--dim', summaryOpen ? '1' : '0');
     $('#list').replaceChildren(
       h('header', { class: 'list-head' },
-        h('div', {},
-          h('h2', {}, current ? current.name : '全部安排'),
-          h('p', { class: 'sub' }, '今天还有 ' + open.length + ' 项 · ' + minutesLabel(open.reduce((n, x) => n + x.minutes, 0)))),
+        h('h2', {}, current ? current.name : '全部安排'),
         current ? h('button', { class: 'icon-btn', 'aria-label': '编辑分区', title: '编辑分区', onclick: () => openSpaceDialog(current) }, icon('gear')) : null),
+      summary(todayNumbers(inSpace)),
       h('div', { class: 'segmented', role: 'tablist' }, tabs.map(([key, label]) =>
         h('button', { role: 'tab', 'aria-selected': String(ui.tab === key), class: ui.tab === key ? 'on' : '', onclick: () => { ui.tab = key; render(); } }, label))),
       h('div', { class: 'list-scroll' }, body),
@@ -386,7 +531,7 @@
       h('div', { class: 'msg-meta' }, h('strong', {}, mine ? '你' : '规划助手'), h('span', {}, timeLabel(m.at)),
         m.source === 'local' && m.proposal ? h('span', { class: 'chip' }, '本地模式') : null,
         m.toolCalls ? h('span', { class: 'chip' }, '读取了 ' + m.toolCalls + ' 次资料') : null),
-      m.attachments ? h('div', { class: 'files' }, m.attachments.map((f) => fileChip(f))) : null,
+      m.attachments ? (m.attachments.length > 1 ? fileStack(m.id, m.attachments) : h('div', { class: 'files' }, m.attachments.map((f) => fileChip(f)))) : null,
       m.text ? h('div', { class: 'bubble' + (m.error ? ' error' : '') }, m.text) : null,
       m.learned ? h('div', { class: 'learned' }, icon('brain'), '已记住：' + m.learned.join('；')) : null,
       m.proposal ? proposalCard(m) : null,
@@ -960,6 +1105,25 @@
   $('#openSettings').append(icon('gear'));
   $('#openSettings').addEventListener('click', () => openSettingsDialog());
   $('#dialog').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeDialog(); });
+
+  /* Space icons grow smoothly as the pointer approaches, largest under the pointer, like a dock. */
+  const rail = $('#rail');
+  const REACH = 120;
+  rail.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'touch') return;
+    const horizontal = getComputedStyle(rail).flexDirection === 'row';
+    rail.classList.add('magnify');
+    for (const item of rail.querySelectorAll('.rail-item')) {
+      const box = item.getBoundingClientRect();
+      const distance = horizontal ? Math.abs(e.clientX - (box.left + box.width / 2)) : Math.abs(e.clientY - (box.top + 24));
+      const near = Math.max(0, 1 - distance / REACH);
+      item.style.setProperty('--near', (0.5 - 0.5 * Math.cos(Math.PI * near)).toFixed(3));
+    }
+  });
+  rail.addEventListener('pointerleave', () => {
+    rail.classList.remove('magnify');
+    for (const item of rail.querySelectorAll('.rail-item')) item.style.setProperty('--near', '0');
+  });
 
   /* The task column can be dragged wider or narrower. Dragging it very narrow closes it; double-click restores the default. */
   const LIST = { min: 220, max: 640, standard: 320, closeBelow: 150 };
