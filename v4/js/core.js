@@ -103,12 +103,18 @@
     return hit ? hit.id : null;
   }
 
+  /* The space of a proposed item. An explicit id (set by the app when the user is chatting inside a
+     space) wins over a name chosen by the model. */
+  function pickSpace(state, a) {
+    if (a.spaceId && state.spaces.some((x) => x.id === a.spaceId)) return a.spaceId;
+    return spaceIdByName(state, a.space);
+  }
+
   /* A task as the assistant may describe it. Steps are the timed segments of one sitting. */
   function taskFields(state, a, label = '任务') {
     const title = cleanText(a.title, 150);
     if (!title) throw new Error(label + '缺少标题');
-    const out = { title, date: validDate(a.date) ? a.date : null, minutes: cleanMinutes(a.minutes, 30), spaceId: spaceIdByName(state, a.space) };
-    if (a.spaceId && state.spaces.some((x) => x.id === a.spaceId)) out.spaceId = a.spaceId;
+    const out = { title, date: validDate(a.date) ? a.date : null, minutes: cleanMinutes(a.minutes, 30), spaceId: pickSpace(state, a) };
     if (Array.isArray(a.steps) && a.steps.length) {
       out.steps = a.steps.slice(0, MAX_STEPS).map((step) => {
         const stepTitle = cleanText(isObject(step) ? step.title : step, 100);
@@ -166,19 +172,19 @@
         const title = cleanText(a.title, 80);
         if (!title) throw new Error('习惯缺少名称');
         const perWeek = Math.round(Number(a.perWeek));
-        return { type: 'add_habit', title, perWeek: perWeek >= 1 && perWeek <= 7 ? perWeek : 7, spaceId: spaceIdByName(state, a.space) };
+        return { type: 'add_habit', title, perWeek: perWeek >= 1 && perWeek <= 7 ? perWeek : 7, spaceId: pickSpace(state, a) };
       }
       case 'add_goal': {
         const title = cleanText(a.title, 150);
         if (!title) throw new Error('目标缺少名称');
-        const spaceId = spaceIdByName(state, a.space);
+        const spaceId = pickSpace(state, a);
         let budget = 40;
         const milestones = (Array.isArray(a.milestones) ? a.milestones : []).slice(0, 12).map((m) => {
           const name = cleanText(isObject(m) ? m.title : '', 120);
           if (!name) throw new Error('目标的阶段缺少名称');
           const tasks = (Array.isArray(m.tasks) ? m.tasks : []).slice(0, Math.max(0, budget)).map((t) => {
             const fields = taskFields(state, t, '阶段任务');
-            if (!fields.spaceId) fields.spaceId = spaceId;
+            if (spaceId || !fields.spaceId) fields.spaceId = spaceId; // tasks of a goal live in the goal's space
             return fields;
           });
           budget -= tasks.length;
@@ -441,7 +447,8 @@
 
   /* ---------- assistant context ---------- */
   /* Everything the model is allowed to see. Facts only; the model is told not to invent the rest. */
-  function buildContext(state, today, text) {
+  /* `thread` limits the conversation history to one space's chat (null is the general chat). */
+  function buildContext(state, today, text, thread) {
     const spaceName = (id) => (state.spaces.find((x) => x.id === id) || {}).name || null;
     const toDay = (ms) => todayISO(new Date(ms));
     const recentCutoff = addDays(today, -14);
@@ -466,7 +473,7 @@
       habits: state.habits.map((h) => ({ title: h.title, targetPerWeek: h.perWeek, doneThisWeek: habitWeekCount(h, today), doneToday: !!h.log[today] })),
       recentReflections: state.reflections.slice(-5).map((r) => ({ date: r.date, text: r.text.slice(0, 600) })),
       timerRunning: !!state.timer,
-      history: state.messages.slice(-12).map((m) => ({ role: m.role, text: m.text.slice(0, 1500) })),
+      history: state.messages.filter((m) => thread === undefined || (m.spaceId || null) === thread).slice(-12).map((m) => ({ role: m.role, text: m.text.slice(0, 1500) })),
       message: text,
     };
   }

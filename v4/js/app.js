@@ -131,7 +131,8 @@
     const a = state.settings.agent;
     return a.modelId && a.baseUrl ? a.modelId : null;
   };
-  const say = (s, text, extra) => s.messages.push({ id: C.uid('msg'), role: 'assistant', at: Date.now(), source: 'local', text, ...extra });
+  const inThread = (m) => (m.spaceId || null) === ui.space; // each space has its own conversation; null is the general one
+  const say = (s, text, extra) => s.messages.push({ id: C.uid('msg'), role: 'assistant', at: Date.now(), source: 'local', spaceId: ui.space, text, ...extra });
 
   const fileChip = (f, onRemove) => h('span', { class: 'file-chip' + (f.thumb ? ' has-thumb' : '') },
     f.thumb ? h('img', { class: 'thumb', src: f.thumb, alt: '' }) : icon('file'),
@@ -212,7 +213,7 @@
   const askOnboarding = (s, index) => say(s, ONBOARDING[index].text, { options: ONBOARDING[index].options.map(([label, value]) => ({ label, pref: { index, value } })) });
   function answerOnboarding(option) {
     change((s) => {
-      s.messages.push({ id: C.uid('msg'), role: 'user', text: option.label, at: Date.now() });
+      s.messages.push({ id: C.uid('msg'), role: 'user', text: option.label, at: Date.now(), spaceId: ui.space });
       s.settings.prefs[ONBOARDING[option.pref.index].key] = option.pref.value;
       if (option.pref.index + 1 < ONBOARDING.length) return askOnboarding(s, option.pref.index + 1);
       s.settings.prefs.onboarded = true;
@@ -495,7 +496,7 @@
       return change((s) => {
         const task = s.tasks.find((t) => t.id === option.feel.taskId);
         if (task) task.feel = option.feel.value;
-        s.messages.push({ id: C.uid('msg'), role: 'user', text: option.label, at: Date.now() });
+        s.messages.push({ id: C.uid('msg'), role: 'user', text: option.label, at: Date.now(), spaceId: ui.space });
         say(s, { easy: '记下了。下次类似的内容我会安排得紧一些。', ok: '记下了，这个节奏适合你。', hard: '记下了。下次类似的内容我会拆得更小，时间留得更多。' }[option.feel.value]);
       });
     }
@@ -544,12 +545,13 @@
   }
   function renderChat() {
     const model = modelName();
-    const last = state.messages.length - 1;
+    const thread = state.messages.filter(inThread);
+    const last = thread.length - 1;
     const previous = $('#chatScroll');
     const offset = previous ? previous.scrollTop : 0;
-    const chatKey = state.messages.length + ':' + ui.busy + ':' + ui.busyText;
+    const chatKey = ui.space + ':' + thread.length + ':' + ui.busy + ':' + ui.busyText;
     const scroller = h('div', { class: 'chat-scroll', id: 'chatScroll' },
-      state.messages.map((m, i) => messageRow(m, i === last)),
+      thread.map((m, i) => messageRow(m, i === last)),
       ui.busy ? h('div', { class: 'msg theirs' }, h('div', { class: 'bubble typing', role: 'status' }, h('i'), h('i'), h('i'), ui.busyText ? h('span', { class: 'sub' }, ui.busyText) : null)) : null);
     const input = h('textarea', {
       id: 'composer', rows: 2, maxLength: 4000, value: ui.draft,
@@ -562,15 +564,17 @@
     const main = $('#main');
     const hour = new Date().getHours();
     const greeting = (hour < 5 ? '夜深了' : hour < 11 ? '早上好' : hour < 13 ? '中午好' : hour < 18 ? '下午好' : '晚上好') + (state.settings.prefs.name ? '，' + state.settings.prefs.name : '');
-    const empty = !state.messages.length && !ui.busy;
+    const here = space(ui.space);
+    const empty = !thread.length && !ui.busy;
     main.classList.toggle('home', empty);
     main.replaceChildren(
       h('header', { class: 'main-head' },
-        h('div', {}, h('h2', {}, '规划助手'), h('p', { class: 'sub' }, model ? '模型：' + model : '本地模式 · 还没有连接 AI 模型')),
+        h('div', {}, h('h2', {}, here ? here.name + ' · 规划助手' : '规划助手'), h('p', { class: 'sub' }, (here ? '这个分区自己的对话 · ' : '总对话 · ') + (model ? '模型：' + model : '本地模式，还没有连接 AI 模型'))),
         h('div', { class: 'head-actions' },
           h('button', { class: 'pill soft', onclick: () => openSettings('memory') }, icon('note'), h('span', {}, '记忆 ' + state.memory.length + ' 条')),
           !model ? h('button', { class: 'pill soft', onclick: () => openSettings('model') }, icon('plus'), h('span', {}, '连接模型')) : null)),
-      empty ? h('div', { class: 'greeting' }, h('span', { class: 'brand-mark', 'aria-hidden': 'true' }, 'T'), h('h1', {}, greeting)) : scroller,
+      empty ? h('div', { class: 'greeting' }, here ? h('span', { class: 'avatar', style: 'background:' + here.color, 'aria-hidden': 'true' }, here.name.slice(0, 1)) : h('span', { class: 'brand-mark', 'aria-hidden': 'true' }, 'T'),
+        h('h1', {}, here ? '在「' + here.name + '」里想推进什么？' : greeting)) : scroller,
       h('div', { class: 'composer' },
         ui.attachments.length || ui.parsing ? h('div', { class: 'files' },
           ui.attachments.map((f) => fileChip(f, () => { ui.attachments = ui.attachments.filter((x) => x !== f); render(); })),
@@ -578,7 +582,7 @@
         input,
         h('div', { class: 'composer-bar' },
           h('button', { class: 'icon-btn small', 'aria-label': '添加文件', title: '添加课件、图片或代码文件', onclick: () => picker.click() }, icon('clip')), picker,
-          h('span', { class: 'sub grow' }, ui.space ? '当前分区：' + space(ui.space).name : '助手只会提议，你确认后才写入'),
+          h('span', { class: 'sub grow' }, here ? '新建的任务和目标会放进「' + here.name + '」' : '助手只会提议，你确认后才写入'),
           h('button', { class: 'send', id: 'send', 'aria-label': '发送', onclick: () => send() }, icon('send')))),
       empty ? h('div', { class: 'starters' }, STARTERS.map((text) => h('button', { class: 'pill option', onclick: () => send(text) }, text))) : null,
       h('div', { class: 'drop-hint' }, icon('file'), '松开，把文件交给助手'));
@@ -629,9 +633,10 @@
       if (!platform.canSeeImages) return toast('桌面版暂时不能发送图片');
       if (state.settings.agent.vision === false) return toast('测试时这个模型不能识图。请在设置里换一个能识图的模型。');
     }
-    const context = C.buildContext(state, today(), text);
-    if (ui.space) context.currentSpace = space(ui.space).name;
-    const sent = { id: C.uid('msg'), role: 'user', text, at: Date.now() };
+    const threadSpace = ui.space; // fixed now: the reply belongs to the conversation it was asked in, even if the user switches space meanwhile
+    const context = C.buildContext(state, today(), text, threadSpace);
+    if (threadSpace) context.currentSpace = space(threadSpace).name;
+    const sent = { id: C.uid('msg'), role: 'user', text, at: Date.now(), spaceId: threadSpace };
     if (attachments.length) sent.attachments = attachments.map((f) => ({ name: f.name, kind: f.kind, units: f.units, ...(f.thumb ? { thumb: f.thumb } : {}) }));
     if (!change((s) => s.messages.push(sent))) return;
     if (!preset) { ui.draft = ''; ui.attachments = []; }
@@ -662,9 +667,10 @@
     ui.busy = false;
     change((s) => {
       const now = Date.now();
-      const message = { id: C.uid('msg'), role: 'assistant', at: now, source: useModel ? 'ai' : 'local', text: error || answer.reply };
+      const message = { id: C.uid('msg'), role: 'assistant', at: now, source: useModel ? 'ai' : 'local', spaceId: threadSpace, text: error || answer.reply };
       if (error) { message.error = true; s.messages.push(message); return; }
-      const withSpace = answer.actions.map((a) => (a && a.type && a.space == null && ui.space ? { ...a, spaceId: ui.space } : a));
+      // Inside a space, everything new goes to that space; the model's own choice only counts in the general chat.
+      const withSpace = answer.actions.map((a) => (a && typeof a === 'object' && threadSpace ? { ...a, spaceId: threadSpace } : a));
       const checked = C.validateActions(s, withSpace);
       // Memory notes are saved right away (they are easy to review and delete); everything else waits for confirmation.
       const notes = [...answer.memory, ...checked.actions.filter((a) => a.type === 'remember').map((a) => a.text)];

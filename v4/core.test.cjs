@@ -281,3 +281,27 @@ test('providers: presets, old settings, and request shapes', () => {
   assert.throws(() => Providers.chatRequest({ provider: 'custom', baseUrl: 'http://example.com', modelId: 'm' }, '', 's', 'u'));
   assert.match(Providers.explain(401, { error: { message: 'bad key' } }), /密钥.*bad key/);
 });
+
+test('inside a space the app decides where new items go, including goals and their tasks', () => {
+  const s = C.emptyState();
+  const { actions } = C.validateActions(s, [
+    { type: 'add_goal', title: '减重', space: '不存在的分区', spaceId: 'space_3', milestones: [{ title: '第 1 个月', tasks: [{ title: '快走 45 分钟', space: '学习' }] }] },
+    { type: 'add_habit', title: '称体重', perWeek: 1, spaceId: 'space_3' },
+    { type: 'add_task', title: '买运动鞋', space: '生活' },
+    { type: 'add_task', title: '无分区', space: '乱写' },
+  ]);
+  assert.equal(actions[0].spaceId, 'space_3');
+  assert.equal(actions[0].milestones[0].tasks[0].spaceId, 'space_3');
+  assert.equal(actions[0].deadline, null);
+  assert.equal(actions[1].spaceId, 'space_3');
+  assert.equal(actions[2].spaceId, 'space_4');
+  assert.equal(actions[3].spaceId, null);
+});
+
+test('each space has its own conversation history', () => {
+  const s = C.emptyState();
+  s.messages.push({ id: 'a', role: 'user', text: 'general', at: 1 }, { id: 'b', role: 'user', text: 'health', at: 2, spaceId: 'space_3' });
+  assert.deepEqual(C.buildContext(s, TODAY, 'x', 'space_3').history.map((m) => m.text), ['health']);
+  assert.deepEqual(C.buildContext(s, TODAY, 'x', null).history.map((m) => m.text), ['general']);
+  assert.equal(C.buildContext(s, TODAY, 'x').history.length, 2);
+});
