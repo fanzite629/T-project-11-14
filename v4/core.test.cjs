@@ -72,6 +72,21 @@ test('dismissing writes nothing; a stale proposal fails as a whole', () => {
   assert.throws(() => C.resolveProposal(s, 'm1', true));
 });
 
+test('proposed steps can be edited before confirming', () => {
+  let s = withProposal(C.emptyState(), [{ type: 'add_task', title: 'MCU', steps: [{ title: 'A', minutes: 30 }, { title: 'B', minutes: 30 }] }]);
+  const edit = (op) => { s = C.editProposal(s, 'm1', 0, op); return s.messages[0].proposal.actions[0]; };
+  assert.equal(edit({ kind: 'minutes', step: 0, delta: -10 }).minutes, 50);
+  assert.equal(edit({ kind: 'minutes', step: 0, delta: -100 }).steps[0].minutes, 5);
+  assert.equal(edit({ kind: 'title', step: 1, title: '  Lab  ' }).steps[1].title, 'Lab');
+  assert.deepEqual(edit({ kind: 'move', step: 1, dir: -1 }).steps.map((x) => x.title), ['Lab', 'A']);
+  assert.equal(edit({ kind: 'add' }).steps.length, 3);
+  assert.equal(edit({ kind: 'remove', step: 0 }).minutes, 30);
+  assert.throws(() => C.editProposal(s, 'm1', 0, { kind: 'title', step: 0, title: ' ' }));
+  const done = C.resolveProposal(s, 'm1', true);
+  assert.deepEqual(done.tasks[0].steps.map((x) => [x.title, x.minutes]), [['A', 5], ['新的一步', 25]]);
+  assert.throws(() => C.editProposal(done, 'm1', 0, { kind: 'add' }), 'a confirmed proposal is frozen');
+});
+
 test('a goal becomes milestones with linked tasks', () => {
   const s = withProposal(C.emptyState(), [{
     type: 'add_goal', title: 'Finish MCU course', deadline: '2026-12-31', space: '学习',
@@ -182,6 +197,8 @@ test('parseReply reads final answers, tool calls, fenced JSON and plain text', (
   assert.equal(final.actions.length, 1);
   assert.deepEqual(final.options, ['好']);
   assert.equal(final.startTimer, true);
+  const asked = Agent.parseReply('{"reply":"q","questions":[{"question":"每天多久？","options":["1 小时","2 小时"],"multi":false},{"question":"bad","options":["only one"]},{"question":"哪几天？","options":["周一","周三","周五"],"multi":true}]}');
+  assert.deepEqual(asked.questions.map((q) => [q.question, q.options.length, q.multi]), [['每天多久？', 2, false], ['哪几天？', 3, true]]);
   assert.deepEqual(Agent.parseReply('{"tool":{"name":"get_history","args":{"days":7}}}').tool, { name: 'get_history', args: { days: 7 } });
   assert.equal(Agent.parseReply('```json\n{"reply":"hi"}\n```').reply, 'hi');
   assert.equal(Agent.parseReply('Sure, here is my advice.').reply, 'Sure, here is my advice.');

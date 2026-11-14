@@ -8,7 +8,7 @@
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not(.light) {
     --canvas: #131418; --panel: #1c1d22; --rail: #17181c; --list: #1a1b20; --soft: #282a31; --line: #30323a;
     --ink: #f2f3f5; --text: #e6e7ea; --t2: #a2a6b1; --t3: #767a86;
     --mine: #24493a; --bad-soft: #43231e;
@@ -255,3 +255,47 @@ body.dragging .drop-hint { display: flex; }
 .pip-body .dock-card { border: 0; border-radius: 0; box-shadow: none; min-height: 100vh; }
 .segmented button { font-size: 14px; }
 
+
+/* ----- numbered, editable steps ----- */
+.steps { list-style: none; padding: 0; gap: 0; }
+.steps li { display: flex; align-items: center; gap: 8px; padding: 5px 0; min-height: 34px; }
+.steps li + li { border-top: 1px dashed var(--line); }
+.num { flex: none; min-width: 22px; color: var(--t2); font-weight: 650; font-variant-numeric: tabular-nums; }
+.step-title { flex: 1; min-width: 0; text-align: left; overflow-wrap: anywhere; }
+.steps li > .sub { flex: none; }
+.step-title.editable { padding: 3px 6px; margin: 0 -6px; border-radius: 8px; }
+.step-title.editable:hover { background: var(--soft); }
+.step-input { flex: 1; min-width: 0; padding: 4px 8px; border-radius: 8px; border: 1.5px solid var(--ink); background: var(--panel); }
+.step-tools { flex: none; display: flex; align-items: center; gap: 2px; }
+.step-min { min-width: 44px; text-align: center; font-size: 13.5px; font-variant-numeric: tabular-nums; color: var(--t2); }
+.mini { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; color: var(--t2); }
+.mini:hover:not(:disabled) { background: var(--soft); color: var(--text); }
+.mini:disabled { opacity: .25; }
+.mini .icon { width: 14px; height: 14px; }
+.steps-foot { display: flex; align-items: center; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
+.steps.boxed { padding: 6px 12px; }
+.steps.boxed li.done .step-title { color: var(--t3); text-decoration: line-through; }
+
+/* ----- question form ----- */
+.ask { align-self: stretch; display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; border-radius: 18px; border: 1px solid var(--line); background: var(--panel); min-width: min(460px, 100%); }
+.ask.closed { opacity: .6; }
+.ask-q { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ask-q legend { padding: 0; font-weight: 650; display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.ask-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.pill.pick { border: 1.5px solid var(--line); color: var(--text); background: var(--panel); padding: 6px 14px; font-weight: 550; }
+.pill.pick:hover:not(:disabled) { border-color: var(--t3); }
+.pill.pick.on { border-color: var(--ink); background: var(--ink); color: var(--panel); }
+.pill.pick .icon { width: 14px; height: 14px; stroke-width: 2.6; }
+.ask-foot { display: flex; gap: 8px; }
+.ask-note { flex: 1; min-width: 0; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--list); }
+
+/* ----- timer: corner buttons and compact mode ----- */
+.dock-corner { display: flex; gap: 4px; flex: none; }
+.icon-btn.solid { background: var(--ink); color: var(--panel); }
+.icon-btn.solid:hover { background: var(--ink); color: var(--panel); opacity: .85; }
+.dock-card.compact { gap: 8px; padding: 10px 12px; }
+.dock-row { display: flex; align-items: center; gap: 8px; }
+.dock-card.compact .dock-time { font-size: 26px; flex: none; }
+.dock-card.compact .dock-titles { flex: 1; }
+.dock-card.compact .dock-dots { height: 4px; }
+.pip-body .dock-card.compact { justify-content: center; }

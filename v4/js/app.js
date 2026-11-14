@@ -14,6 +14,9 @@
   const library = new Map(); // files read during this session, by name; kept out of saved state because they are large
   let pip = null; // floating timer window, when open
   let dueNotified = null;
+  let editing = null; // the proposal step whose title is being edited: { message, action, step }
+  const answers = new Map(); // unsent picks in question forms, by message id
+  let lastChatKey = '';
 
   /* ---------- storage ---------- */
   function loadState() {
@@ -71,6 +74,10 @@
     close: 'M6 6l12 12M18 6L6 18',
     pop: 'M14 4h6v6M20 4l-8 8M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
     file: 'M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7Zm0 0v4h4',
+    minus: 'M6 12h12',
+    up: 'M6 14l6-6 6 6',
+    shrink: 'M5 19h14',
+    grow: 'M8 4H4v4M16 20h4v-4M4 4l6 6M20 20l-6-6',
   };
   function icon(name) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -242,12 +249,37 @@
     const sp = a.spaceId ? ' · ' + (space(a.spaceId) || {}).name : '';
     return dateLabel(a.date) + ' · ' + minutesLabel(a.minutes) + sp;
   }
-  const stepList = (steps) => h('ol', { class: 'steps' }, steps.map((s) => h('li', {}, h('span', {}, s.title), h('span', { class: 'sub' }, s.minutes + ' 分钟'))));
-  function actionItem(a) {
+  const stepList = (steps) => h('ol', { class: 'steps' }, steps.map((s, i) => h('li', {}, h('span', { class: 'num' }, i + 1 + '.'), h('span', { class: 'step-title' }, s.title), h('span', { class: 'sub' }, s.minutes + ' 分钟'))));
+  /* The same list with controls: rename, change minutes, reorder, remove, add. */
+  function editableSteps(message, index, a) {
+    const steps = a.steps || [{ title: a.title, minutes: a.minutes }];
+    const edit = (op) => { try { commit(C.editProposal(state, message.id, index, op)); } catch (error) { toast(error.message); } };
+    const mini = (label, glyph, onclick, disabled) => h('button', { class: 'mini', 'aria-label': label, title: label, onclick, disabled }, icon(glyph));
+    const isEditing = (i) => editing && editing.message === message.id && editing.action === index && editing.step === i;
+    const titleInput = (s, i) => h('input', {
+      class: 'step-input', value: s.title, maxLength: 100, 'aria-label': '第 ' + (i + 1) + ' 步的内容',
+      onkeydown: (e) => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') { editing = null; render(); } },
+      onblur: (e) => { if (!editing) return; editing = null; if (e.target.value.trim() && e.target.value.trim() !== s.title) edit({ kind: 'title', step: i, title: e.target.value }); else render(); },
+    });
+    return h('div', { class: 'steps-edit' },
+      h('ol', { class: 'steps' }, steps.map((s, i) => h('li', {},
+        h('span', { class: 'num' }, i + 1 + '.'),
+        isEditing(i) ? titleInput(s, i) : h('button', { class: 'step-title editable', title: '点击修改', onclick: () => { editing = { message: message.id, action: index, step: i }; render(); } }, s.title),
+        h('span', { class: 'step-tools' },
+          mini('减少 5 分钟', 'minus', () => edit({ kind: 'minutes', step: i, delta: -5 }), s.minutes <= 5),
+          h('span', { class: 'step-min' }, s.minutes + ' 分'),
+          mini('增加 5 分钟', 'plus', () => edit({ kind: 'minutes', step: i, delta: 5 })),
+          mini('上移', 'up', () => edit({ kind: 'move', step: i, dir: -1 }), i === 0),
+          mini('删除这一步', 'close', () => edit({ kind: 'remove', step: i }), steps.length <= 1))))),
+      h('div', { class: 'steps-foot' },
+        h('button', { class: 'pill soft', onclick: () => edit({ kind: 'add' }) }, icon('plus'), '加一步'),
+        h('span', { class: 'sub' }, '共 ' + minutesLabel(steps.reduce((n, s) => n + s.minutes, 0)) + ' · 点文字可以修改')));
+  }
+  function actionItem(a, index, message) {
     const name = (id) => (state.tasks.find((t) => t.id === id) || {}).title || '（任务已不存在）';
     const line = (kind, title, meta, extra) => h('li', {},
       h('div', { class: 'p-line' }, h('span', { class: 'tag t-' + a.type }, kind), h('span', { class: 'p-title' }, title), meta ? h('span', { class: 'sub' }, meta) : null), extra);
-    if (a.type === 'add_task') return line('新任务', a.title, taskSummary(a), a.steps ? stepList(a.steps) : null);
+    if (a.type === 'add_task') return line('新任务', a.title, taskSummary(a), message.proposal.status === 'pending' ? editableSteps(message, index, a) : a.steps ? stepList(a.steps) : null);
     if (a.type === 'update_task') {
       const parts = [];
       if (a.title !== undefined) parts.push('改名为「' + a.title + '」');
@@ -281,8 +313,8 @@
       } catch (error) { toast(error.message); }
     };
     return h('div', { class: 'proposal ' + p.status },
-      h('div', { class: 'proposal-head' }, h('strong', {}, '提议 · ' + p.actions.length + ' 项'), h('span', { class: 'sub' }, status)),
-      h('ul', { class: 'p-list' }, p.actions.map(actionItem)),
+      h('div', { class: 'proposal-head' }, h('strong', {}, '提议 · ' + p.actions.length + ' 项'), h('span', { class: 'sub' }, (p.edited ? '你修改过 · ' : '') + status)),
+      h('ul', { class: 'p-list' }, p.actions.map((a, i) => actionItem(a, i, message))),
       p.status === 'pending' ? h('div', { class: 'proposal-actions' },
         canTime ? h('button', { class: 'btn dark', onclick: () => resolve(true, true) }, icon('play'), '确认并开始计时') : null,
         h('button', { class: canTime ? 'btn outline slim' : 'btn dark', onclick: () => resolve(true, false) }, canTime ? '只确认' : '确认写入'),
@@ -301,6 +333,34 @@
     }
     send(option.label);
   }
+  /* A form the assistant can ask with: pick options, optionally add a note, send once. */
+  function questionCard(m, isLast) {
+    const live = isLast && !m.answered && !ui.busy;
+    if (!answers.has(m.id)) answers.set(m.id, { picks: m.questions.map(() => []), note: '' });
+    const draft = answers.get(m.id);
+    const ready = () => draft.picks.every((p) => p.length) || draft.note.trim();
+    const submit = () => {
+      if (!ready()) return toast('请先选择，或者写一句补充');
+      const lines = m.questions.map((q, i) => (draft.picks[i].length ? q.question + ' ' + draft.picks[i].join('、') : null)).filter(Boolean);
+      if (draft.note.trim()) lines.push(draft.note.trim());
+      answers.delete(m.id);
+      if (change((s) => { s.messages.find((x) => x.id === m.id).answered = true; })) send(lines.join('\n'));
+    };
+    return h('div', { class: 'ask' + (live ? '' : ' closed') },
+      m.questions.map((q, i) => h('fieldset', { class: 'ask-q', disabled: !live },
+        h('legend', {}, h('span', { class: 'num' }, i + 1 + '.'), q.question, q.multi ? h('span', { class: 'sub' }, ' 可多选') : null),
+        h('div', { class: 'ask-options' }, q.options.map((option) => {
+          const on = draft.picks[i].includes(option);
+          return h('button', { class: 'pill pick' + (on ? ' on' : ''), 'aria-pressed': String(on), onclick: () => {
+            draft.picks[i] = q.multi ? (on ? draft.picks[i].filter((x) => x !== option) : [...draft.picks[i], option]) : (on ? [] : [option]);
+            render();
+          } }, on ? icon('check') : null, option);
+        })))),
+      live ? h('div', { class: 'ask-foot' },
+        h('input', { class: 'ask-note', placeholder: '想补充的话写在这里（可以不写）', maxLength: 300, value: draft.note,
+          oninput: (e) => { draft.note = e.target.value; }, onkeydown: (e) => { if (e.key === 'Enter' && !e.isComposing) submit(); } }),
+        h('button', { class: 'btn dark', onclick: submit }, '发送')) : h('span', { class: 'sub' }, m.answered ? '已回答' : '已跳过'));
+  }
   function messageRow(m, isLast) {
     const mine = m.role === 'user';
     return h('div', { class: 'msg ' + (mine ? 'mine' : 'theirs') },
@@ -311,11 +371,15 @@
       m.text ? h('div', { class: 'bubble' + (m.error ? ' error' : '') }, m.text) : null,
       m.learned ? h('div', { class: 'learned' }, icon('brain'), '已记住：' + m.learned.join('；')) : null,
       m.proposal ? proposalCard(m) : null,
+      m.questions ? questionCard(m, isLast) : null,
       isLast && m.options && !ui.busy ? h('div', { class: 'options' }, m.options.map((o) => h('button', { class: 'pill option', onclick: () => chooseOption(o) }, o.label))) : null);
   }
   function renderChat() {
     const model = modelName();
     const last = state.messages.length - 1;
+    const previous = $('#chatScroll');
+    const offset = previous ? previous.scrollTop : 0;
+    const chatKey = state.messages.length + ':' + ui.busy + ':' + ui.busyText;
     const scroller = h('div', { class: 'chat-scroll', id: 'chatScroll' },
       state.messages.map((m, i) => messageRow(m, i === last)),
       ui.busy ? h('div', { class: 'msg theirs' }, h('div', { class: 'bubble typing', role: 'status' }, h('i'), h('i'), h('i'), ui.busyText ? h('span', { class: 'sub' }, ui.busyText) : null)) : null);
@@ -346,7 +410,10 @@
           h('button', { class: 'send', id: 'send', 'aria-label': '发送', onclick: () => send() }, icon('send')))),
       h('div', { class: 'drop-hint' }, icon('file'), '松开，把文件交给助手'));
     updateSend();
-    scroller.scrollTop = scroller.scrollHeight;
+    scroller.scrollTop = previous && chatKey === lastChatKey ? offset : scroller.scrollHeight;
+    lastChatKey = chatKey;
+    const stepInput = main.querySelector('.step-input');
+    if (stepInput) { stepInput.focus(); stepInput.select(); }
   }
   function updateSend() {
     const button = $('#send');
@@ -428,7 +495,8 @@
       const actions = checked.actions.filter((a) => a.type !== 'remember');
       if (actions.length) message.proposal = { status: 'pending', source: message.source, actions, startTimer: answer.startTimer };
       if (checked.rejected.length) message.text += '\n（有 ' + checked.rejected.length + ' 项提议格式不对，已忽略。）';
-      if (answer.options.length) message.options = answer.options.map((label) => ({ label }));
+      if (answer.questions.length) message.questions = answer.questions;
+      else if (answer.options.length) message.options = answer.options.map((label) => ({ label }));
       if (answer.toolCalls) message.toolCalls = answer.toolCalls;
       s.messages.push(message);
       if (s.messages.length > 400) s.messages = s.messages.slice(-400);
@@ -444,8 +512,11 @@
   async function openFloating() {
     if (pip || !('documentPictureInPicture' in window)) return;
     try {
-      const win = await window.documentPictureInPicture.requestWindow({ width: 340, height: 250 });
+      const compact = state.settings.prefs.timerCompact;
+      const win = await window.documentPictureInPicture.requestWindow({ width: compact ? 300 : 340, height: compact ? 84 : 250 });
       for (const link of document.querySelectorAll('link[rel=stylesheet]')) win.document.head.append(link.cloneNode());
+      win.document.documentElement.className = 'light'; // the floating timer stays light whatever the system theme
+      win.document.title = '计时';
       win.document.body.className = 'pip-body';
       win.addEventListener('pagehide', () => { pip = null; renderDock(); });
       pip = win;
@@ -484,12 +555,28 @@
     if (!view) { inPage.hidden = true; inPage.replaceChildren(); return; }
     const button = (label, cls, onclick, glyph) => h('button', { class: 'btn ' + cls, onclick }, glyph ? icon(glyph) : null, label);
     const last = view.index === view.total - 1;
-    const content = h('div', { class: 'dock-card' },
+    const compact = state.settings.prefs.timerCompact;
+    const setCompact = (value) => {
+      if (pip) { try { pip.resizeTo(value ? 300 : 340, value ? 84 + (pip.outerHeight - pip.innerHeight) : 250 + (pip.outerHeight - pip.innerHeight)); } catch { /* size stays as the user left it */ } }
+      change((s) => { s.settings.prefs.timerCompact = value; });
+    };
+    const iconButton = (label, glyph, onclick, cls) => h('button', { class: 'icon-btn small ' + (cls || ''), 'aria-label': label, title: label, onclick }, icon(glyph));
+    const content = compact ? h('div', { class: 'dock-card compact' },
+      h('div', { class: 'dock-row' },
+        h('div', { class: 'dock-time', id: 'dockTime' }),
+        h('div', { class: 'dock-titles' }, h('span', { class: 'sub' }, '第 ' + (view.index + 1) + '/' + view.total + ' 段'), h('strong', { class: 'dock-step', title: view.step.title }, view.step.title)),
+        view.running ? iconButton('暂停', 'pause', () => commit(C.pauseTimer(state, Date.now()))) : iconButton('继续', 'play', () => commit(C.resumeTimer(state, Date.now()))),
+        iconButton(last ? '完成' : '下一段', 'check', finishCurrentStep, 'solid'),
+        iconButton('展开', 'grow', () => setCompact(false))),
+      h('div', { class: 'dock-dots', 'aria-hidden': 'true' }, view.task.steps.map((s, i) => h('span', { class: s.done ? 'done' : i === view.index ? 'now' : '', style: 'flex:' + s.minutes }, i === view.index ? h('i', { id: 'dockFill' }) : null))))
+    : h('div', { class: 'dock-card' },
       h('div', { class: 'dock-head' },
         h('div', { class: 'dock-titles' },
           h('span', { class: 'sub' }, view.task.title + ' · 第 ' + (view.index + 1) + '/' + view.total + ' 段'),
           h('strong', { class: 'dock-step' }, view.step.title)),
-        !pip && 'documentPictureInPicture' in window ? h('button', { class: 'icon-btn small', 'aria-label': '打开悬浮窗', title: '悬浮窗', onclick: openFloating }, icon('pop')) : null),
+        h('div', { class: 'dock-corner' },
+          iconButton('最小化', 'shrink', () => setCompact(true)),
+          !pip && 'documentPictureInPicture' in window ? iconButton('打开悬浮窗', 'pop', openFloating) : null)),
       h('div', { class: 'dock-time', id: 'dockTime' }),
       h('div', { class: 'dock-dots', 'aria-hidden': 'true' }, view.task.steps.map((s, i) => h('span', { class: s.done ? 'done' : i === view.index ? 'now' : '', style: 'flex:' + s.minutes }, i === view.index ? h('i', { id: 'dockFill' }) : null))),
       h('div', { class: 'dock-actions' },

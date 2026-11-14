@@ -19,7 +19,7 @@
     '',
     '【输出】只输出一个 JSON 对象，不要输出其他文字。两种形式：',
     '1. 需要更多信息时调用一个工具：{"tool":{"name":"工具名","args":{}}}',
-    '2. 最终回答：{"reply":"","actions":[],"options":[],"memory":[],"startTimer":false}',
+    '2. 最终回答：{"reply":"","actions":[],"options":[],"questions":[],"memory":[],"startTimer":false}',
     '',
     '【工具】（只读，每次一个，最多 6 次）',
     'read_attachment {"name":"文件名","offset":0}：继续读取附件，从 offset 字符开始。attachments 里只给了开头，文件更长时用它读后面的内容。',
@@ -36,6 +36,7 @@
     '  {"type":"add_habit","title":"","perWeek":3,"space":""}',
     '  {"type":"add_goal","title":"","deadline":"YYYY-MM-DD 或 null","space":"","milestones":[{"title":"第 1 周：……","due":"YYYY-MM-DD","tasks":[{"title":"","date":"","minutes":60,"steps":[]}]}]}',
     'options：2 到 4 个用户可以直接点击的简短回答（每个不超过 20 个字）。需要用户做选择或补充信息时，一定给出 options，让用户点击而不是打字。',
+    'questions：需要用户回答两件以上的事，或者需要多选时使用，界面会显示成可以点选的表单：[{"question":"问题","options":["选项1","选项2"],"multi":false}]。最多 3 个问题，每个 2 到 5 个选项，multi 为 true 表示可以多选。用户总是可以另外输入文字，所以不要加“其他”选项。用了 questions 就不要再给 options。',
     'memory：从这次对话中学到的、以后长期有用的事实（作息、偏好、限制、正在学的课程、目标）。只写用户明确说过或数据明确显示的，没有就给空数组。不要重复 memory 里已有的内容。',
     'startTimer：用户想现在就开始做时为 true，界面会在确认后自动打开计时窗口并按 steps 分段计时。',
     '',
@@ -44,7 +45,7 @@
     '有附件或代码时：先读内容，steps 必须对应材料里真实的章节、页码、文件或函数。内容不够就用工具继续读，不要猜。',
     '大目标（几周或几个月）：用 add_goal。按周分成 milestones；最近 1 到 2 周的任务写到具体的某一天（需要时带 steps，也就是小时级的安排），更远的周只写任务、date 用 null。每天安排的总时长不要超过 preferences.dailyMinutes。',
     '使用 profile：actualVsPlanned 大于 1.15 说明用户通常比计划慢，要把时间估长一些或内容减少；focusMinutesByTimeOfDay 显示用户哪个时段专注得多，优先安排在那里；typicalFocusMinutes 是用户真实的一段专注时长；difficultyFeedback 里 hard 多就把步骤拆得更小。profile 里没有的数据说明记录还不够，不要假设。',
-    '信息不够时（不知道截止日期、每天有多少时间、基础如何），先问一个问题并给 options，不要一次问很多。',
+    '信息不够时（不知道截止日期、每天有多少时间、基础如何），用 options 问一个问题，或者用 questions 一次问清楚两三件事。不要让用户打字回答可以点选的问题。',
     '',
     '【规则】taskId 只能用 openTasks 里给出的。日期不确定用 null。不要编造用户做过或没做过的事，没有记录就说没有记录。不要从用时推断学习效果。',
   ].join('\n');
@@ -56,6 +57,11 @@
     const start = body.indexOf('{');
     const end = body.lastIndexOf('}');
     const strings = (value, count, max) => (Array.isArray(value) ? value : []).filter((x) => typeof x === 'string' && x.trim()).slice(0, count).map((x) => x.trim().slice(0, max));
+    const questions = (value) => (Array.isArray(value) ? value : []).map((q) => ({
+      question: typeof (q && q.question) === 'string' ? q.question.trim().slice(0, 120) : '',
+      options: strings(q && q.options, 5, 40),
+      multi: !!(q && q.multi === true),
+    })).filter((q) => q.question && q.options.length >= 2).slice(0, 3);
     if (start >= 0 && end > start) {
       try {
         const v = JSON.parse(body.slice(start, end + 1));
@@ -68,13 +74,14 @@
             reply: v.reply.trim().slice(0, 6000),
             actions: Array.isArray(v.actions) ? v.actions : [],
             options: strings(v.options, 4, 40),
+            questions: questions(v.questions),
             memory: strings(v.memory, 5, 300),
             startTimer: v.startTimer === true,
           };
         }
       } catch { /* fall through to plain text */ }
     }
-    return { tool: null, reply: text.slice(0, 6000) || '（模型没有返回内容）', actions: [], options: [], memory: [], startTimer: false };
+    return { tool: null, reply: text.slice(0, 6000) || '（模型没有返回内容）', actions: [], options: [], questions: [], memory: [], startTimer: false };
   }
 
   function attachmentSummary(file) {
@@ -97,7 +104,7 @@
       const answer = parseReply(await chat(SYSTEM_PROMPT, JSON.stringify(payload)));
       if (!answer.tool) return { ...answer, toolCalls: toolResults.length };
       if (step >= MAX_TOOL_STEPS) {
-        return { tool: null, reply: '我读取了很多次资料还没有得出结论。请告诉我最想先安排哪一部分。', actions: [], options: [], memory: [], startTimer: false, toolCalls: toolResults.length };
+        return { tool: null, reply: '我读取了很多次资料还没有得出结论。请告诉我最想先安排哪一部分。', actions: [], options: [], questions: [], memory: [], startTimer: false, toolCalls: toolResults.length };
       }
       const { name, args } = answer.tool;
       onStep(name, args);

@@ -50,7 +50,7 @@
       timer: null,
       settings: {
         agent: { provider: 'openai', baseUrl: '', modelId: '' },
-        prefs: { segment: 25, dailyMinutes: null, bestTime: null, onboarded: false },
+        prefs: { segment: 25, dailyMinutes: null, bestTime: null, onboarded: false, timerCompact: false },
       },
     };
   }
@@ -255,6 +255,36 @@
     p.status = 'accepted';
     p.resolvedAt = now;
     p.created = created;
+    return s;
+  }
+
+  /* Lets the user adjust the steps of a proposed task before confirming it. Returns a new state. */
+  function editProposal(state, messageId, actionIndex, op) {
+    const s = clone(state);
+    const message = s.messages.find((m) => m.id === messageId);
+    if (!message || !message.proposal || message.proposal.status !== 'pending') throw new Error('这份提议已经处理过了');
+    const a = message.proposal.actions[actionIndex];
+    if (!a || a.type !== 'add_task') throw new Error('这一项不能修改');
+    if (!a.steps) a.steps = [{ title: a.title, minutes: Math.min(180, a.minutes) }];
+    const step = a.steps[op.step];
+    if (op.kind !== 'add' && !step) throw new Error('这一步已经不存在');
+    if (op.kind === 'minutes') step.minutes = Math.min(180, Math.max(5, step.minutes + op.delta));
+    else if (op.kind === 'title') {
+      const title = cleanText(op.title, 100);
+      if (!title) throw new Error('步骤内容不能为空');
+      step.title = title;
+    } else if (op.kind === 'remove') {
+      if (a.steps.length <= 1) throw new Error('至少保留一步');
+      a.steps.splice(op.step, 1);
+    } else if (op.kind === 'move') {
+      const to = op.step + op.dir;
+      if (to >= 0 && to < a.steps.length) a.steps.splice(to, 0, a.steps.splice(op.step, 1)[0]);
+    } else if (op.kind === 'add') {
+      if (a.steps.length >= MAX_STEPS) throw new Error('最多 ' + MAX_STEPS + ' 步');
+      a.steps.push({ title: cleanText(op.title, 100) || '新的一步', minutes: s.settings.prefs.segment || 25 });
+    } else throw new Error('不支持的修改');
+    a.minutes = sum(a.steps, (x) => x.minutes);
+    message.proposal.edited = true;
     return s;
   }
 
@@ -493,6 +523,7 @@
           : '现在是本地模式（没有连接 AI 模型），我把每一行当作一件事。请检查下面的提议。',
       actions,
       options: [],
+      questions: [],
       memory: [],
       startTimer: !!planned && lines.length === 1,
     };
@@ -501,7 +532,7 @@
   return {
     VERSION, SPACE_COLORS,
     clone, uid, todayISO, validDate, addDays, weekStart,
-    emptyState, normalize, validateActions, resolveProposal, addMemory,
+    emptyState, normalize, validateActions, resolveProposal, editProposal, addMemory,
     habitWeekCount, timerElapsed, timerView, startTimer, pauseTimer, resumeTimer, extendTimer, finishStep, stopTimer,
     buildProfile, buildContext, history, parseLine, splitIntoSteps, localReply,
   };
