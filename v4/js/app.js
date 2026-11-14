@@ -552,6 +552,10 @@
     const chatKey = ui.space + ':' + thread.length + ':' + ui.busy + ':' + ui.busyText;
     const scroller = h('div', { class: 'chat-scroll', id: 'chatScroll' },
       thread.map((m, i) => messageRow(m, i === last)),
+      !thread.length && !ui.busy ? h('div', { class: 'welcome' },
+        h('h3', {}, space(ui.space) ? '在「' + space(ui.space).name + '」里想推进什么？' : (state.settings.prefs.name ? state.settings.prefs.name + '，' : '') + '今天想推进什么？'),
+        h('p', { class: 'sub' }, '告诉我你的任务、目标或者困难，也可以把课件、图片拖进来。我会先看你的安排和记录，再提出修改，你确认之后才会写入。'),
+        h('div', { class: 'starters' }, STARTERS.map((text) => h('button', { class: 'pill soft', onclick: () => send(text) }, text)))) : null,
       ui.busy ? h('div', { class: 'msg theirs' }, h('div', { class: 'bubble typing', role: 'status' }, h('i'), h('i'), h('i'), ui.busyText ? h('span', { class: 'sub' }, ui.busyText) : null)) : null);
     const input = h('textarea', {
       id: 'composer', rows: 2, maxLength: 4000, value: ui.draft,
@@ -562,19 +566,14 @@
     });
     const picker = h('input', { type: 'file', multiple: true, hidden: true, onchange: (e) => { addFiles(e.target.files); e.target.value = ''; } });
     const main = $('#main');
-    const hour = new Date().getHours();
-    const greeting = (hour < 5 ? '夜深了' : hour < 11 ? '早上好' : hour < 13 ? '中午好' : hour < 18 ? '下午好' : '晚上好') + (state.settings.prefs.name ? '，' + state.settings.prefs.name : '');
     const here = space(ui.space);
-    const empty = !thread.length && !ui.busy;
-    main.classList.toggle('home', empty);
     main.replaceChildren(
       h('header', { class: 'main-head' },
         h('div', {}, h('h2', {}, here ? here.name + ' · 规划助手' : '规划助手'), h('p', { class: 'sub' }, (here ? '这个分区自己的对话 · ' : '总对话 · ') + (model ? '模型：' + model : '本地模式，还没有连接 AI 模型'))),
         h('div', { class: 'head-actions' },
           h('button', { class: 'pill soft', onclick: () => openSettings('memory') }, icon('note'), h('span', {}, '记忆 ' + state.memory.length + ' 条')),
           !model ? h('button', { class: 'pill soft', onclick: () => openSettings('model') }, icon('plus'), h('span', {}, '连接模型')) : null)),
-      empty ? h('div', { class: 'greeting' }, here ? h('span', { class: 'avatar', style: 'background:' + here.color, 'aria-hidden': 'true' }, here.name.slice(0, 1)) : h('span', { class: 'brand-mark', 'aria-hidden': 'true' }, 'T'),
-        h('h1', {}, here ? '在「' + here.name + '」里想推进什么？' : greeting)) : scroller,
+      scroller,
       h('div', { class: 'composer' },
         ui.attachments.length || ui.parsing ? h('div', { class: 'files' },
           ui.attachments.map((f) => fileChip(f, () => { ui.attachments = ui.attachments.filter((x) => x !== f); render(); })),
@@ -584,7 +583,6 @@
           h('button', { class: 'icon-btn small', 'aria-label': '添加文件', title: '添加课件、图片或代码文件', onclick: () => picker.click() }, icon('clip')), picker,
           h('span', { class: 'sub grow' }, here ? '新建的任务和目标会放进「' + here.name + '」' : '助手只会提议，你确认后才写入'),
           h('button', { class: 'send', id: 'send', 'aria-label': '发送', onclick: () => send() }, icon('send')))),
-      empty ? h('div', { class: 'starters' }, STARTERS.map((text) => h('button', { class: 'pill option', onclick: () => send(text) }, text))) : null,
       h('div', { class: 'drop-hint' }, icon('file'), '松开，把文件交给助手'));
     updateSend();
     scroller.scrollTop = previous && chatKey === lastChatKey ? offset : scroller.scrollHeight;

@@ -439,18 +439,6 @@ body { padding: 14px; gap: 0; }
 .brand-btn .brand-mark { width: 40px; height: 40px; border-radius: 13px; font-size: 20px; font-weight: 750; }
 .brand-btn .brand-name { font-size: 12.5px; font-weight: 700; color: var(--text); }
 
-/* chat column centred like a reading column */
-.main-head { border-bottom: 0; padding-bottom: 8px; }
-.chat-scroll { padding-left: max(28px, calc((100% - 860px) / 2)); padding-right: max(28px, calc((100% - 860px) / 2)); }
-.composer { width: min(860px, calc(100% - 56px)); margin: 0 auto 22px; }
-.main.home { justify-content: flex-start; }
-.main.home .main-head { margin-bottom: auto; }
-.main.home .composer { margin-bottom: 14px; width: min(720px, calc(100% - 56px)); }
-.main.home .starters { margin: 0 auto auto; padding: 0 28px 40px; width: min(720px, 100%); }
-.greeting { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 0 28px 22px; }
-.greeting h1 { margin: 0; font-size: 30px; font-weight: 650; letter-spacing: .01em; }
-.greeting .brand-mark { width: 38px; height: 38px; border-radius: 12px; font-size: 20px; font-weight: 750; }
-
 /* settings panel: categories on the left, content on the right */
 .panel { border: 0; padding: 0; border-radius: 24px; background: var(--panel); color: var(--text); box-shadow: var(--pop); width: min(1060px, calc(100vw - 48px)); height: min(760px, calc(100vh - 48px)); max-width: none; max-height: none; overflow: hidden; }
 .panel[open] { display: flex; flex-direction: column; }
