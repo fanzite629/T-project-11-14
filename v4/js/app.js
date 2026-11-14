@@ -4,11 +4,16 @@
   'use strict';
 
   const C = window.TPlanCore;
+  const Agent = window.TPlanAgent;
+  const Files = window.TPlanFiles;
   const platform = window.TPlanPlatform;
   const $ = (selector) => document.querySelector(selector);
 
   let state = loadState();
-  const ui = { view: 'chat', space: null, tab: 'today', busy: false, draft: '' };
+  const ui = { view: 'chat', space: null, tab: 'today', busy: false, busyText: '', draft: '', attachments: [], parsing: 0 };
+  const library = new Map(); // files read during this session, by name; kept out of saved state because they are large
+  let pip = null; // floating timer window, when open
+  let dueNotified = null;
 
   /* ---------- storage ---------- */
   function loadState() {
@@ -50,16 +55,22 @@
       else if (key in el && key !== 'list') el[key] = value;
       else el.setAttribute(key, value);
     }
-    for (const child of children.flat()) if (child != null && child !== false) el.append(child);
+    for (const child of children.flat(Infinity)) if (child != null && child !== false) el.append(child);
     return el;
   }
   const ICONS = {
-    gear: 'M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm7.4-3.5c0-.5 0-.9-.1-1.3l2-1.5-2-3.4-2.3.9c-.7-.6-1.5-1-2.3-1.3L14.3 3h-4l-.4 2.4c-.8.3-1.6.7-2.300 1.300l-2.300-.9-2 3.400 2 1.500a8 8 0 0 0 0 2.600l-2 1.500 2 3.400 2.300-.9c.7.6 1.500 1 2.300 1.300l.4 2.400h4l.4-2.400c.8-.3 1.600-.7 2.300-1.300l2.300.9 2-3.400-2-1.500c.1-.4.1-.8.1-1.300Z',
+    gear: 'M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm7.4-3.5c0-.5 0-.9-.1-1.3l2-1.5-2-3.4-2.3.9c-.7-.6-1.5-1-2.3-1.3L14.3 3h-4l-.4 2.4c-.8.3-1.6.7-2.3 1.3l-2.3-.9-2 3.4 2 1.5a8 8 0 0 0 0 2.6l-2 1.5 2 3.4 2.3-.9c.7.6 1.5 1 2.3 1.3l.4 2.4h4l.4-2.4c.8-.3 1.6-.7 2.3-1.3l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.3Z',
     plus: 'M12 5v14M5 12h14',
     send: 'M12 19V5M5 12l7-7 7 7',
-    check: 'M5 12.5l4.5 4.5L19 7.500',
+    check: 'M5 12.5l4.5 4.5L19 7.5',
     trash: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13',
     brain: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 5v4l3 2',
+    clip: 'M20 11.5l-8.2 8.2a5 5 0 0 1-7-7L13 4.400a3.300 3.300 0 0 1 4.700 4.700l-8.200 8.200a1.700 1.700 0 0 1-2.400-2.400L14.600 7.500',
+    play: 'M8 5.500v13l10.500-6.500Z',
+    pause: 'M8 5v14M16 5v14',
+    close: 'M6 6l12 12M18 6L6 18',
+    pop: 'M14 4h6v6M20 4l-8 8M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
+    file: 'M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7Zm0 0v4h4',
   };
   function icon(name) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -83,22 +94,44 @@
   /* ---------- formatting ---------- */
   const today = () => C.todayISO();
   const space = (id) => state.spaces.find((x) => x.id === id) || null;
+  const plainDate = (date) => Number(date.slice(5, 7)) + '月' + Number(date.slice(8)) + '日';
   function dateLabel(date) {
     if (!date) return '未定日期';
     const t = today();
     if (date === t) return '今天';
     if (date === C.addDays(t, 1)) return '明天';
     if (date === C.addDays(t, -1)) return '昨天';
-    const d = new Date(date + 'T12:00:00');
-    return (d.getMonth() + 1) + '月' + d.getDate() + '日 周' + '日一二三四五六'[d.getDay()];
+    return plainDate(date) + ' 周' + '日一二三四五六'[new Date(date + 'T12:00:00').getDay()];
   }
-  const plainDate = (date) => Number(date.slice(5, 7)) + '月' + Number(date.slice(8)) + '日';
   const minutesLabel = (m) => (m >= 60 ? (m % 60 ? Math.floor(m / 60) + ' 小时 ' + (m % 60) + ' 分' : m / 60 + ' 小时') : m + ' 分钟');
   const timeLabel = (ms) => new Date(ms).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  const clock = (ms) => {
+    const seconds = Math.floor(Math.abs(ms) / 1000);
+    return String(Math.floor(seconds / 60)).padStart(2, '0') + ':' + String(seconds % 60).padStart(2, '0');
+  };
   const modelName = () => {
     const a = state.settings.agent;
     return a.modelId && (a.provider === 'anthropic' || a.baseUrl) ? a.modelId : null;
   };
+  const say = (s, text, extra) => s.messages.push({ id: C.uid('msg'), role: 'assistant', at: Date.now(), source: 'local', text, ...extra });
+
+  /* ---------- first-run interview: three questions answered by clicking ---------- */
+  const ONBOARDING = [
+    { key: 'segment', text: '你好，我是你的规划助手。先问三个小问题，点一下就行。\n\n你一次能专注多久？', options: [['15 分钟', 15], ['25 分钟', 25], ['30 分钟', 30], ['45 分钟', 45]] },
+    { key: 'dailyMinutes', text: '平时每天大约有多少时间可以自己安排（学习、项目）？', options: [['1 小时', 60], ['2 小时', 120], ['3 小时', 180], ['4 小时以上', 240]] },
+    { key: 'bestTime', text: '一天中什么时候效率最高？', options: [['早上', '早上'], ['下午', '下午'], ['晚上', '晚上'], ['深夜', '深夜']] },
+  ];
+  const STARTERS = ['帮我规划今天', '我现在有 2 小时，想学习一份课件', '我有一个大目标，帮我拆开'];
+  const askOnboarding = (s, index) => say(s, ONBOARDING[index].text, { options: ONBOARDING[index].options.map(([label, value]) => ({ label, pref: { index, value } })) });
+  function answerOnboarding(option) {
+    change((s) => {
+      s.messages.push({ id: C.uid('msg'), role: 'user', text: option.label, at: Date.now() });
+      s.settings.prefs[ONBOARDING[option.pref.index].key] = option.pref.value;
+      if (option.pref.index + 1 < ONBOARDING.length) return askOnboarding(s, option.pref.index + 1);
+      s.settings.prefs.onboarded = true;
+      say(s, '好了，我记住了。以后我会根据你真实的计时记录慢慢调整安排。\n\n现在你可以把课件（PDF、PPT、Word、Excel）或代码文件拖进聊天框，告诉我你有多少时间，我来拆成一段一段并帮你计时。也可以直接点下面的选项。', { options: STARTERS.map((label) => ({ label })) });
+    });
+  }
 
   /* ---------- rail: spaces ---------- */
   function renderRail() {
@@ -115,7 +148,7 @@
     );
   }
 
-  /* ---------- list: tasks and habits ---------- */
+  /* ---------- list: tasks, habits, goals ---------- */
   function visibleTasks() {
     const t = today();
     const weekEnd = C.addDays(C.weekStart(t), 6);
@@ -131,17 +164,20 @@
   function taskRow(t) {
     const sp = space(t.spaceId);
     const overdue = !t.done && t.date && t.date < today();
-    return h('div', { class: 'task' + (t.done ? ' done' : '') },
+    const timing = state.timer && state.timer.taskId === t.id;
+    return h('div', { class: 'task' + (t.done ? ' done' : '') + (timing ? ' timing' : '') },
       h('button', {
         class: 'check', 'aria-label': t.done ? '标记为未完成' : '标记为完成', 'aria-pressed': String(t.done),
-        onclick: () => change((s) => { const x = s.tasks.find((y) => y.id === t.id); x.done = !x.done; x.doneAt = x.done ? Date.now() : null; }),
+        onclick: () => change((s) => { const x = s.tasks.find((y) => y.id === t.id); x.done = !x.done; x.doneAt = x.done ? Date.now() : null; if (x.done && s.timer && s.timer.taskId === x.id) s.timer = null; }),
       }, t.done ? icon('check') : null),
       h('button', { class: 'task-body', onclick: () => openTaskDialog(t) },
         h('span', { class: 'task-title' }, t.title),
         h('span', { class: 'task-meta' },
           sp ? h('span', { class: 'dot', style: 'background:' + sp.color }) : null,
           h('span', { class: overdue ? 'overdue' : '' }, overdue ? '已过期 · ' + dateLabel(t.date) : dateLabel(t.date)),
-          h('span', {}, '· ' + minutesLabel(t.minutes)))));
+          h('span', {}, '· ' + minutesLabel(t.minutes)),
+          t.steps ? h('span', {}, '· ' + t.steps.filter((x) => x.done).length + '/' + t.steps.length + ' 段') : null)),
+      !t.done && !state.timer ? h('button', { class: 'play', 'aria-label': '开始计时：' + t.title, title: '开始计时', onclick: () => beginTimer(t.id) }, icon('play')) : null);
   }
   function habitRow(habit) {
     const t = today();
@@ -157,156 +193,378 @@
         h('span', { class: 'task-meta' }, '本周 ' + count + ' / ' + habit.perWeek)),
       h('span', { class: 'meter', 'aria-hidden': 'true' }, h('span', { style: 'width:' + Math.min(100, (count / habit.perWeek) * 100) + '%' })));
   }
+  function goalCard(goal) {
+    const tasks = state.tasks.filter((t) => t.goalId === goal.id);
+    const done = tasks.filter((t) => t.done).length;
+    return h('div', { class: 'goal' },
+      h('div', { class: 'goal-head' },
+        h('strong', {}, goal.title),
+        h('button', { class: 'icon-btn small', 'aria-label': '删除目标', title: '删除目标', onclick: () => {
+          if (confirm('删除目标「' + goal.title + '」？它的任务会保留。')) commit(C.normalize({ ...C.clone(state), goals: state.goals.filter((g) => g.id !== goal.id) }));
+        } }, icon('trash'))),
+      h('span', { class: 'task-meta' }, (goal.deadline ? '截止 ' + plainDate(goal.deadline) + ' · ' : '') + done + ' / ' + tasks.length + ' 项完成'),
+      h('span', { class: 'meter wide', 'aria-hidden': 'true' }, h('span', { style: 'width:' + (tasks.length ? (done / tasks.length) * 100 : 0) + '%' })),
+      h('ol', { class: 'milestones' }, goal.milestones.map((m, index) => {
+        const mine = tasks.filter((t) => t.milestone === index);
+        const finished = mine.length > 0 && mine.every((t) => t.done);
+        return h('li', { class: finished ? 'done' : '' }, h('span', {}, m.title), h('span', { class: 'sub' }, mine.filter((t) => t.done).length + '/' + mine.length));
+      })));
+  }
   function renderList() {
-    const tabs = [['today', '今天'], ['week', '本周'], ['later', '之后']];
-    const tasks = visibleTasks();
-    const habits = state.habits.filter((x) => !ui.space || x.spaceId === ui.space);
-    const open = tasks.filter((x) => !x.done);
+    const tabs = [['today', '今天'], ['week', '本周'], ['later', '之后'], ['goals', '目标']];
     const current = space(ui.space);
-    const empty = { today: '今天还没有安排。可以告诉助手你想做什么。', week: '本周后面几天还没有安排。', later: '没有以后的任务或未定日期的任务。' }[ui.tab];
+    const inSpace = (x) => !ui.space || x.spaceId === ui.space;
+    const tasks = ui.tab === 'goals' ? [] : visibleTasks();
+    const habits = state.habits.filter(inSpace);
+    const goals = state.goals.filter(inSpace);
+    const open = state.tasks.filter((x) => inSpace(x) && !x.done && x.date && x.date <= today());
+    const empty = { today: '今天还没有安排。告诉助手你想做什么，或者拖一份课件进来。', week: '本周后面几天还没有安排。', later: '没有以后的任务或未定日期的任务。' }[ui.tab];
+    const body = ui.tab === 'goals'
+      ? (goals.length ? goals.map(goalCard) : h('p', { class: 'empty' }, '还没有目标。在聊天里说「我想在 12 月底前学完单片机」，助手会拆成每周和每天的任务。'))
+      : [tasks.length ? tasks.map(taskRow) : h('p', { class: 'empty' }, empty),
+        ui.tab === 'today' && habits.length ? [h('h3', { class: 'group-title' }, '习惯'), ...habits.map(habitRow)] : null];
     $('#list').replaceChildren(
       h('header', { class: 'list-head' },
         h('div', {},
           h('h2', {}, current ? current.name : '全部安排'),
-          h('p', { class: 'sub' }, open.length + ' 项未完成 · ' + minutesLabel(open.reduce((n, x) => n + x.minutes, 0) || 0))),
+          h('p', { class: 'sub' }, '今天还有 ' + open.length + ' 项 · ' + minutesLabel(open.reduce((n, x) => n + x.minutes, 0)))),
         current ? h('button', { class: 'icon-btn', 'aria-label': '编辑分区', title: '编辑分区', onclick: () => openSpaceDialog(current) }, icon('gear')) : null),
       h('div', { class: 'segmented', role: 'tablist' }, tabs.map(([key, label]) =>
         h('button', { role: 'tab', 'aria-selected': String(ui.tab === key), class: ui.tab === key ? 'on' : '', onclick: () => { ui.tab = key; render(); } }, label))),
-      h('div', { class: 'list-scroll' },
-        tasks.length ? tasks.map(taskRow) : h('p', { class: 'empty' }, empty),
-        ui.tab === 'today' && habits.length ? [h('h3', { class: 'group-title' }, '习惯'), ...habits.map(habitRow)] : null),
+      h('div', { class: 'list-scroll' }, body),
       h('div', { class: 'list-foot' },
         h('button', { class: 'btn outline', onclick: () => openTaskDialog(null) }, icon('plus'), '新建任务'),
         h('button', { class: 'btn ghost', onclick: () => openHabitDialog(null) }, icon('plus'), '新习惯')));
   }
 
   /* ---------- chat ---------- */
-  function actionLine(a) {
-    const name = (id) => (state.tasks.find((t) => t.id === id) || {}).title || '（任务已不存在）';
+  function taskSummary(a) {
     const sp = a.spaceId ? ' · ' + (space(a.spaceId) || {}).name : '';
-    if (a.type === 'add_task') return ['新任务', a.title, dateLabel(a.date) + ' · ' + minutesLabel(a.minutes) + sp];
+    return dateLabel(a.date) + ' · ' + minutesLabel(a.minutes) + sp;
+  }
+  const stepList = (steps) => h('ol', { class: 'steps' }, steps.map((s) => h('li', {}, h('span', {}, s.title), h('span', { class: 'sub' }, s.minutes + ' 分钟'))));
+  function actionItem(a) {
+    const name = (id) => (state.tasks.find((t) => t.id === id) || {}).title || '（任务已不存在）';
+    const line = (kind, title, meta, extra) => h('li', {},
+      h('div', { class: 'p-line' }, h('span', { class: 'tag t-' + a.type }, kind), h('span', { class: 'p-title' }, title), meta ? h('span', { class: 'sub' }, meta) : null), extra);
+    if (a.type === 'add_task') return line('新任务', a.title, taskSummary(a), a.steps ? stepList(a.steps) : null);
     if (a.type === 'update_task') {
       const parts = [];
       if (a.title !== undefined) parts.push('改名为「' + a.title + '」');
       if (a.date !== undefined) parts.push('改到 ' + dateLabel(a.date));
       if (a.minutes !== undefined) parts.push('时长 ' + minutesLabel(a.minutes));
-      return ['修改', name(a.taskId), parts.join(' · ')];
+      return line('修改', name(a.taskId), parts.join(' · '));
     }
-    if (a.type === 'complete_task') return ['完成', name(a.taskId), ''];
-    if (a.type === 'delete_task') return ['删除', name(a.taskId), ''];
-    if (a.type === 'add_habit') return ['新习惯', a.title, '每周 ' + a.perWeek + ' 次' + sp];
-    return ['记住', a.text, '保存到长期记忆'];
+    if (a.type === 'complete_task') return line('完成', name(a.taskId));
+    if (a.type === 'delete_task') return line('删除', name(a.taskId));
+    if (a.type === 'add_habit') return line('新习惯', a.title, '每周 ' + a.perWeek + ' 次');
+    if (a.type === 'add_goal') {
+      return line('新目标', a.title, a.deadline ? '截止 ' + plainDate(a.deadline) : '', h('div', { class: 'goal-plan' }, a.milestones.map((m) => h('div', { class: 'milestone' },
+        h('div', { class: 'milestone-title' }, m.title, m.due ? h('span', { class: 'sub' }, ' · ' + plainDate(m.due) + ' 前') : null),
+        h('ul', {}, m.tasks.map((t) => h('li', {}, h('span', {}, t.title), h('span', { class: 'sub' }, taskSummary(t) + (t.steps ? ' · ' + t.steps.length + ' 段' : '')))))))));
+    }
+    return line('记住', a.text);
   }
   function proposalCard(message) {
     const p = message.proposal;
     const status = { pending: '等待你确认 · 还没有写入', accepted: '已确认并写入', dismissed: '已放弃' }[p.status];
-    const resolve = (accept) => {
-      try { commit(C.resolveProposal(state, message.id, accept)); if (accept) toast('已写入 ' + p.actions.length + ' 项'); }
-      catch (error) { toast(error.message); }
+    const canTime = p.startTimer && !state.timer && p.actions.some((a) => a.type === 'add_task');
+    const resolve = (accept, withTimer) => {
+      try {
+        let next = C.resolveProposal(state, message.id, accept);
+        if (accept && withTimer) {
+          const created = next.messages.find((m) => m.id === message.id).proposal.created.map((id) => next.tasks.find((t) => t.id === id));
+          const first = created.find((t) => t.steps) || created[0];
+          if (first) { next = C.startTimer(next, first.id, Date.now()); openFloating(); }
+        }
+        if (commit(next) && accept) toast(withTimer ? '已写入，计时开始' : '已写入');
+      } catch (error) { toast(error.message); }
     };
     return h('div', { class: 'proposal ' + p.status },
-      h('div', { class: 'proposal-head' }, h('strong', {}, '提议 · ' + p.actions.length + ' 项修改'), h('span', { class: 'sub' }, status)),
-      h('ul', {}, p.actions.map((a) => {
-        const [kind, title, meta] = actionLine(a);
-        return h('li', {}, h('span', { class: 'tag t-' + a.type }, kind), h('span', { class: 'p-title' }, title), meta ? h('span', { class: 'sub' }, meta) : null);
-      })),
+      h('div', { class: 'proposal-head' }, h('strong', {}, '提议 · ' + p.actions.length + ' 项'), h('span', { class: 'sub' }, status)),
+      h('ul', { class: 'p-list' }, p.actions.map(actionItem)),
       p.status === 'pending' ? h('div', { class: 'proposal-actions' },
-        h('button', { class: 'btn dark', onclick: () => resolve(true) }, '确认写入'),
+        canTime ? h('button', { class: 'btn dark', onclick: () => resolve(true, true) }, icon('play'), '确认并开始计时') : null,
+        h('button', { class: canTime ? 'btn outline slim' : 'btn dark', onclick: () => resolve(true, false) }, canTime ? '只确认' : '确认写入'),
         h('button', { class: 'btn ghost', onclick: () => resolve(false) }, '放弃')) : null);
   }
-  function messageRow(m) {
+  function chooseOption(option) {
+    if (ui.busy) return;
+    if (option.pref) return answerOnboarding(option);
+    if (option.feel) {
+      return change((s) => {
+        const task = s.tasks.find((t) => t.id === option.feel.taskId);
+        if (task) task.feel = option.feel.value;
+        s.messages.push({ id: C.uid('msg'), role: 'user', text: option.label, at: Date.now() });
+        say(s, { easy: '记下了。下次类似的内容我会安排得紧一些。', ok: '记下了，这个节奏适合你。', hard: '记下了。下次类似的内容我会拆得更小，时间留得更多。' }[option.feel.value]);
+      });
+    }
+    send(option.label);
+  }
+  function messageRow(m, isLast) {
     const mine = m.role === 'user';
     return h('div', { class: 'msg ' + (mine ? 'mine' : 'theirs') },
-      h('div', { class: 'msg-meta' }, h('strong', {}, mine ? '你' : '规划助手'), h('span', {}, timeLabel(m.at)), m.source === 'local' ? h('span', { class: 'chip' }, '本地模式') : null),
-      h('div', { class: 'bubble' + (m.error ? ' error' : '') }, m.text),
-      m.proposal ? proposalCard(m) : null);
+      h('div', { class: 'msg-meta' }, h('strong', {}, mine ? '你' : '规划助手'), h('span', {}, timeLabel(m.at)),
+        m.source === 'local' && m.proposal ? h('span', { class: 'chip' }, '本地模式') : null,
+        m.toolCalls ? h('span', { class: 'chip' }, '读取了 ' + m.toolCalls + ' 次资料') : null),
+      m.attachments ? h('div', { class: 'files' }, m.attachments.map((f) => h('span', { class: 'file-chip' }, icon('file'), f.name, h('span', { class: 'sub' }, f.kind + ' · ' + f.units)))) : null,
+      m.text ? h('div', { class: 'bubble' + (m.error ? ' error' : '') }, m.text) : null,
+      m.learned ? h('div', { class: 'learned' }, icon('brain'), '已记住：' + m.learned.join('；')) : null,
+      m.proposal ? proposalCard(m) : null,
+      isLast && m.options && !ui.busy ? h('div', { class: 'options' }, m.options.map((o) => h('button', { class: 'pill option', onclick: () => chooseOption(o) }, o.label))) : null);
   }
   function renderChat() {
     const model = modelName();
-    const starters = ['帮我安排今天', '这周我完成了什么？', '我想每周运动三次', '下周五要交报告，帮我拆成几步'];
+    const last = state.messages.length - 1;
     const scroller = h('div', { class: 'chat-scroll', id: 'chatScroll' },
-      state.messages.length ? state.messages.map(messageRow) : h('div', { class: 'welcome' },
-        h('h3', {}, '今天想推进什么？'),
-        h('p', { class: 'sub' }, '告诉我你的任务、目标或者困难。我会先看你的安排和记录，再提出修改，你确认之后才会写入。'),
-        h('div', { class: 'starters' }, starters.map((text) => h('button', { class: 'pill soft', onclick: () => { ui.draft = text; render(); $('#composer').focus(); } }, text)))),
-      ui.busy ? h('div', { class: 'msg theirs' }, h('div', { class: 'bubble typing', 'aria-label': '助手正在思考' }, h('i'), h('i'), h('i'))) : null);
+      state.messages.map((m, i) => messageRow(m, i === last)),
+      ui.busy ? h('div', { class: 'msg theirs' }, h('div', { class: 'bubble typing', role: 'status' }, h('i'), h('i'), h('i'), ui.busyText ? h('span', { class: 'sub' }, ui.busyText) : null)) : null);
     const input = h('textarea', {
       id: 'composer', rows: 2, maxLength: 4000, value: ui.draft,
-      placeholder: model ? '告诉助手你想做什么，Enter 发送，Shift+Enter 换行' : '本地模式：每行写一件事，例如「明天 复习第三章 45分钟」',
-      oninput: (e) => { ui.draft = e.target.value; $('#send').disabled = !ui.draft.trim() || ui.busy; },
+      placeholder: model ? '说说你想做什么，或把课件、代码文件拖进来' : '本地模式：例如「单片机 2小时」。连接模型后可以读课件',
+      oninput: (e) => { ui.draft = e.target.value; updateSend(); },
       onkeydown: (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } },
     });
-    $('#main').replaceChildren(
+    const picker = h('input', { type: 'file', multiple: true, hidden: true, onchange: (e) => { addFiles(e.target.files); e.target.value = ''; } });
+    const main = $('#main');
+    main.replaceChildren(
       h('header', { class: 'main-head' },
         h('div', {}, h('h2', {}, '规划助手'), h('p', { class: 'sub' }, model ? '模型：' + model : '本地模式 · 还没有连接 AI 模型')),
         h('div', { class: 'head-actions' },
-          h('button', { class: 'pill soft', onclick: openMemoryDialog }, icon('brain'), '记忆 ' + state.memory.length + ' 条'),
-          !model ? h('button', { class: 'pill soft', onclick: openSettingsDialog }, icon('plus'), '连接模型') : null)),
+          h('button', { class: 'pill soft', onclick: openMemoryDialog }, icon('brain'), h('span', {}, '记忆 ' + state.memory.length + ' 条')),
+          !model ? h('button', { class: 'pill soft', onclick: openSettingsDialog }, icon('plus'), h('span', {}, '连接模型')) : null)),
       scroller,
-      h('div', { class: 'composer' }, input,
+      h('div', { class: 'composer' },
+        ui.attachments.length || ui.parsing ? h('div', { class: 'files' },
+          ui.attachments.map((f) => h('span', { class: 'file-chip' }, icon('file'), f.name, h('span', { class: 'sub' }, f.kind + ' · ' + f.units),
+            h('button', { class: 'chip-x', 'aria-label': '移除 ' + f.name, onclick: () => { ui.attachments = ui.attachments.filter((x) => x !== f); render(); } }, icon('close')))),
+          ui.parsing ? h('span', { class: 'file-chip' }, '正在读取文件…') : null) : null,
+        input,
         h('div', { class: 'composer-bar' },
-          h('span', { class: 'sub' }, ui.space ? '当前分区：' + space(ui.space).name : '助手只会提议，你确认后才写入'),
-          h('button', { class: 'send', id: 'send', 'aria-label': '发送', disabled: !ui.draft.trim() || ui.busy, onclick: send }, icon('send')))));
+          h('button', { class: 'icon-btn small', 'aria-label': '添加文件', title: '添加课件或代码文件', onclick: () => picker.click() }, icon('clip')), picker,
+          h('span', { class: 'sub grow' }, ui.space ? '当前分区：' + space(ui.space).name : '助手只会提议，你确认后才写入'),
+          h('button', { class: 'send', id: 'send', 'aria-label': '发送', onclick: () => send() }, icon('send')))),
+      h('div', { class: 'drop-hint' }, icon('file'), '松开，把文件交给助手'));
+    updateSend();
     scroller.scrollTop = scroller.scrollHeight;
   }
+  function updateSend() {
+    const button = $('#send');
+    if (button) button.disabled = ui.busy || ui.parsing > 0 || !(ui.draft.trim() || ui.attachments.length);
+  }
 
-  async function send() {
-    const text = ui.draft.trim();
+  async function addFiles(fileList) {
+    const files = [...fileList].slice(0, 6);
+    if (!files.length) return;
+    if (ui.view !== 'chat') ui.view = 'chat';
+    ui.parsing += files.length;
+    render();
+    for (const file of files) {
+      try {
+        const parsed = await Files.parseFile(file);
+        library.set(parsed.name, parsed);
+        ui.attachments = ui.attachments.filter((x) => x.name !== parsed.name).concat(parsed);
+      } catch (error) {
+        toast(file.name + '：' + error.message);
+      }
+      ui.parsing--;
+      render();
+    }
+    const box = $('#composer');
+    if (box) box.focus();
+  }
+
+  const TOOL_LABELS = {
+    read_attachment: (a) => '正在读取 ' + (a.name || '附件') + '…',
+    read_path: (a) => '正在读取 ' + String(a.path || '文件').split(/[\\/]/).pop() + '…',
+    list_dir: () => '正在查看文件夹…',
+    get_history: () => '正在查看你的记录…',
+  };
+  async function send(preset) {
+    const attachments = preset ? [] : ui.attachments;
+    const text = (preset || ui.draft).trim() || (attachments.length ? '请根据这些文件帮我安排学习。' : '');
     if (!text || ui.busy) return;
     const context = C.buildContext(state, today(), text);
     if (ui.space) context.currentSpace = space(ui.space).name;
-    ui.draft = '';
-    if (!change((s) => s.messages.push({ id: C.uid('msg'), role: 'user', text, at: Date.now() }))) { ui.draft = text; return; }
+    const sent = { id: C.uid('msg'), role: 'user', text, at: Date.now() };
+    if (attachments.length) sent.attachments = attachments.map((f) => ({ name: f.name, kind: f.kind, units: f.units }));
+    if (!change((s) => s.messages.push(sent))) return;
+    if (!preset) { ui.draft = ''; ui.attachments = []; }
     const useModel = !!modelName();
     let answer;
     let error = null;
     ui.busy = true;
+    ui.busyText = '';
     render();
     try {
-      answer = useModel
-        ? C.parseReply(await platform.chat(state.settings.agent, C.SYSTEM_PROMPT, JSON.stringify(context)))
-        : C.localReply(text, today());
+      if (useModel) {
+        answer = await Agent.run({
+          context, attachments, library,
+          chat: (system, user) => platform.chat(state.settings.agent, system, user),
+          tools: {
+            read_path: async (a) => { const body = await platform.readPath(String(a.path)); return { path: a.path, totalChars: body.length, text: body.slice(0, 8000) }; },
+            list_dir: async (a) => ({ path: a.path, entries: await platform.listDir(String(a.path)) }),
+            get_history: (a) => C.history(state, today(), a.days),
+          },
+          onStep: (name, args) => { ui.busyText = (TOOL_LABELS[name] || (() => '正在查资料…'))(args); render(); },
+        });
+      } else {
+        answer = C.localReply(text, today(), state.settings.prefs);
+      }
     } catch (e) {
       error = e.message;
     }
     ui.busy = false;
     change((s) => {
-      const message = { id: C.uid('msg'), role: 'assistant', at: Date.now(), source: useModel ? 'ai' : 'local', text: error || answer.reply };
-      if (error) message.error = true;
-      else {
-        const checked = C.validateActions(s, answer.actions.map((a) => (a.type && a.space == null && ui.space ? { ...a, space: ui.space } : a)));
-        if (checked.actions.length) message.proposal = { status: 'pending', source: message.source, actions: checked.actions };
-        if (checked.rejected.length) message.text += '\n（有 ' + checked.rejected.length + ' 项提议格式不对，已忽略。）';
-      }
+      const now = Date.now();
+      const message = { id: C.uid('msg'), role: 'assistant', at: now, source: useModel ? 'ai' : 'local', text: error || answer.reply };
+      if (error) { message.error = true; s.messages.push(message); return; }
+      const withSpace = answer.actions.map((a) => (a && a.type && a.space == null && ui.space ? { ...a, spaceId: ui.space } : a));
+      const checked = C.validateActions(s, withSpace);
+      // Memory notes are saved right away (they are easy to review and delete); everything else waits for confirmation.
+      const notes = [...answer.memory, ...checked.actions.filter((a) => a.type === 'remember').map((a) => a.text)];
+      const learned = notes.filter((note) => C.addMemory(s, note, now, message.source));
+      if (learned.length) message.learned = learned;
+      const actions = checked.actions.filter((a) => a.type !== 'remember');
+      if (actions.length) message.proposal = { status: 'pending', source: message.source, actions, startTimer: answer.startTimer };
+      if (checked.rejected.length) message.text += '\n（有 ' + checked.rejected.length + ' 项提议格式不对，已忽略。）';
+      if (answer.options.length) message.options = answer.options.map((label) => ({ label }));
+      if (answer.toolCalls) message.toolCalls = answer.toolCalls;
       s.messages.push(message);
       if (s.messages.length > 400) s.messages = s.messages.slice(-400);
     });
   }
 
+  /* ---------- timer dock and floating window ---------- */
+  function beginTimer(taskId) {
+    try { if (commit(C.startTimer(state, taskId, Date.now()))) openFloating(); }
+    catch (error) { toast(error.message); }
+  }
+  /* A real always-on-top window where the browser supports it; otherwise the dock stays in the page. */
+  async function openFloating() {
+    if (pip || !('documentPictureInPicture' in window)) return;
+    try {
+      const win = await window.documentPictureInPicture.requestWindow({ width: 340, height: 250 });
+      for (const link of document.querySelectorAll('link[rel=stylesheet]')) win.document.head.append(link.cloneNode());
+      win.document.body.className = 'pip-body';
+      win.addEventListener('pagehide', () => { pip = null; renderDock(); });
+      pip = win;
+      renderDock();
+    } catch { /* the user or the browser declined; the in-page dock is still there */ }
+  }
+  function beep() {
+    try {
+      const audio = new AudioContext();
+      const tone = audio.createOscillator();
+      const gain = audio.createGain();
+      tone.frequency.value = 880;
+      gain.gain.setValueAtTime(0.15, audio.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.8);
+      tone.connect(gain).connect(audio.destination);
+      tone.start();
+      tone.stop(audio.currentTime + 0.8);
+    } catch { /* sound is optional */ }
+  }
+  function finishCurrentStep() {
+    const result = C.finishStep(state, Date.now());
+    if (result.finishedTask) {
+      const task = result.state.tasks.find((t) => t.id === result.finishedTask);
+      const actual = result.state.sessions.filter((x) => x.taskId === task.id).reduce((n, x) => n + x.actual, 0);
+      say(result.state, '完成了「' + task.title + '」。' + (actual ? '实际用时 ' + minutesLabel(actual) + '，计划 ' + minutesLabel(task.minutes) + '。' : '') + '\n感觉怎么样？点一下，我下次会安排得更合适。', {
+        options: [['太简单', 'easy'], ['正好', 'ok'], ['太难', 'hard']].map(([label, value]) => ({ label, feel: { taskId: task.id, value } })),
+      });
+      if (pip) pip.close();
+      ui.view = 'chat';
+    }
+    commit(result.state);
+  }
+  function renderDock() {
+    const inPage = $('#dock');
+    const view = C.timerView(state, Date.now());
+    if (!view) { inPage.hidden = true; inPage.replaceChildren(); return; }
+    const button = (label, cls, onclick, glyph) => h('button', { class: 'btn ' + cls, onclick }, glyph ? icon(glyph) : null, label);
+    const last = view.index === view.total - 1;
+    const content = h('div', { class: 'dock-card' },
+      h('div', { class: 'dock-head' },
+        h('div', { class: 'dock-titles' },
+          h('span', { class: 'sub' }, view.task.title + ' · 第 ' + (view.index + 1) + '/' + view.total + ' 段'),
+          h('strong', { class: 'dock-step' }, view.step.title)),
+        !pip && 'documentPictureInPicture' in window ? h('button', { class: 'icon-btn small', 'aria-label': '打开悬浮窗', title: '悬浮窗', onclick: openFloating }, icon('pop')) : null),
+      h('div', { class: 'dock-time', id: 'dockTime' }),
+      h('div', { class: 'dock-dots', 'aria-hidden': 'true' }, view.task.steps.map((s, i) => h('span', { class: s.done ? 'done' : i === view.index ? 'now' : '', style: 'flex:' + s.minutes }, i === view.index ? h('i', { id: 'dockFill' }) : null))),
+      h('div', { class: 'dock-actions' },
+        view.running ? button('暂停', 'outline slim', () => commit(C.pauseTimer(state, Date.now())), 'pause') : button('继续', 'outline slim', () => commit(C.resumeTimer(state, Date.now())), 'play'),
+        button(last ? '完成' : '下一段', 'dark', finishCurrentStep, 'check'),
+        button('+5 分', 'ghost', () => commit(C.extendTimer(state, 5))),
+        button('结束', 'ghost', () => { if (pip) pip.close(); commit(C.stopTimer(state, Date.now())); })));
+    if (pip) { pip.document.body.replaceChildren(content); inPage.hidden = true; inPage.replaceChildren(); }
+    else { inPage.replaceChildren(content); inPage.hidden = false; }
+    tick();
+  }
+  /* Runs twice a second: updates the clock text only, and announces the end of a step once. */
+  function tick() {
+    const view = C.timerView(state, Date.now());
+    if (!view) return;
+    const doc = pip ? pip.document : document;
+    const time = doc.getElementById('dockTime');
+    if (!time) return;
+    time.textContent = view.due ? '+' + clock(view.remainingMs) : clock(view.remainingMs);
+    time.className = 'dock-time' + (view.due ? ' due' : '') + (view.running ? '' : ' paused');
+    const fill = doc.getElementById('dockFill');
+    if (fill) fill.style.width = Math.min(100, (view.elapsedMs / (view.step.minutes * 60000)) * 100) + '%';
+    document.title = (view.due ? '到时间了 · ' : clock(view.remainingMs) + ' · ') + view.step.title;
+    const key = view.task.id + ':' + view.index + ':' + view.step.minutes;
+    if (view.due && view.running && dueNotified !== key) {
+      dueNotified = key;
+      beep();
+      toast('「' + view.step.title + '」到时间了');
+    }
+  }
+  setInterval(() => { if (state.timer) tick(); else if (document.title !== 'T计划') document.title = 'T计划'; }, 500);
+
   /* ---------- review ---------- */
+  function profileLines() {
+    const p = C.buildProfile(state, today());
+    const prefs = state.settings.prefs;
+    const lines = [];
+    lines.push('你说：一次专注 ' + prefs.segment + ' 分钟' + (prefs.dailyMinutes ? '，每天可安排 ' + minutesLabel(prefs.dailyMinutes) : '') + (prefs.bestTime ? '，' + prefs.bestTime + '效率最高' : '') + '。');
+    if (p.actualVsPlanned) lines.push('实际用时是计划的 ' + Math.round(p.actualVsPlanned * 100) + '%' + (p.actualVsPlanned > 1.15 ? '，你通常比计划慢，助手会把时间留多一些。' : p.actualVsPlanned < 0.85 ? '，你通常比计划快。' : '，估计比较准。'));
+    if (p.typicalFocusMinutes) lines.push('你真实的一段专注大约 ' + p.typicalFocusMinutes + ' 分钟。');
+    if (p.focusMinutesByTimeOfDay) {
+      const [best, minutes] = Object.entries(p.focusMinutesByTimeOfDay).sort((a, b) => b[1] - a[1])[0];
+      lines.push('记录里你在' + best + '专注得最多（' + minutesLabel(minutes) + '）。');
+    }
+    if (p.last14Days) lines.push('最近 14 天安排了 ' + p.last14Days.planned + ' 项，完成 ' + p.last14Days.done + ' 项。');
+    if (p.difficultyFeedback) lines.push('你的反馈：太简单 ' + p.difficultyFeedback.easy + ' 次，正好 ' + p.difficultyFeedback.ok + ' 次，太难 ' + p.difficultyFeedback.hard + ' 次。');
+    if (p.sessionsRecorded < 3) lines.push('计时记录还只有 ' + p.sessionsRecorded + ' 段。用计时完成 3 段以上，助手就能开始根据你的真实速度调整。');
+    return lines;
+  }
   function renderReview() {
     const t = today();
     const start = C.weekStart(t);
     const days = Array.from({ length: 7 }, (_, i) => C.addDays(start, i));
-    const doneOn = (d) => state.tasks.filter((x) => x.done && x.doneAt && C.todayISO(new Date(x.doneAt)) === d);
-    const perDay = days.map((d) => doneOn(d).reduce((n, x) => n + x.minutes, 0));
+    const sessions = state.sessions.filter((x) => x.date >= start && x.date <= days[6]);
+    const perDay = days.map((d) => sessions.filter((x) => x.date === d).reduce((n, x) => n + x.actual, 0));
     const max = Math.max(60, ...perDay);
-    const doneWeek = days.flatMap(doneOn);
+    const doneWeek = state.tasks.filter((x) => x.done && x.doneAt && days.includes(C.todayISO(new Date(x.doneAt))));
     const planned = state.tasks.filter((x) => x.date && x.date >= start && x.date <= days[6]);
     const stat = (value, label) => h('div', { class: 'stat' }, h('strong', {}, value), h('span', { class: 'sub' }, label));
     $('#main').replaceChildren(
       h('header', { class: 'main-head' }, h('div', {}, h('h2', {}, '本周回看'), h('p', { class: 'sub' }, plainDate(days[0]) + ' 至 ' + plainDate(days[6]) + ' · 只显示已记录的事实'))),
       h('div', { class: 'review-scroll' },
         h('div', { class: 'stats' },
-          stat(String(doneWeek.length), '本周完成的任务'),
-          stat(minutesLabel(doneWeek.reduce((n, x) => n + x.minutes, 0) || 0), '完成任务的计划时长'),
+          stat(minutesLabel(perDay.reduce((a, b) => a + b, 0)), '本周计时的专注时间'),
+          stat(String(sessions.length), '完成的计时段数'),
           stat(planned.filter((x) => x.done).length + ' / ' + planned.length, '本周安排的完成情况')),
-        h('section', { class: 'card' }, h('h3', {}, '每天完成的计划时长'),
+        h('section', { class: 'card' }, h('h3', {}, '助手对你的了解'),
+          h('ul', { class: 'plain' }, profileLines().map((line) => h('li', {}, line))),
+          h('div', { class: 'row' }, h('button', { class: 'pill soft', onclick: openMemoryDialog }, icon('brain'), '查看和修改长期记忆（' + state.memory.length + ' 条）'))),
+        h('section', { class: 'card' }, h('h3', {}, '每天的专注时间'),
           h('div', { class: 'bars' }, days.map((d, i) => h('div', { class: 'bar' + (d === t ? ' today' : '') },
             h('span', { class: 'bar-value' }, perDay[i] ? String(perDay[i]) : ''),
             h('span', { class: 'bar-fill', style: 'height:' + (perDay[i] / max) * 100 + '%' }),
             h('span', { class: 'sub' }, '一二三四五六日'[i])))),
-          h('p', { class: 'sub' }, '单位：分钟。这是任务的计划时长，不是实际用时，也不代表学习效果。')),
+          h('p', { class: 'sub' }, '单位：分钟，来自计时记录。时间长短不代表学习效果。')),
         h('section', { class: 'card' }, h('h3', {}, '习惯'),
           state.habits.length ? h('div', { class: 'habit-grid' }, state.habits.map((habit) => h('div', { class: 'habit-line' },
             h('span', { class: 'task-title' }, habit.title),
@@ -335,10 +593,12 @@
       field('要做什么', h('input', { name: 'title', maxLength: 150, required: true, value: task ? task.title : '' })),
       h('div', { class: 'row' },
         field('日期（可以留空）', h('input', { name: 'date', type: 'date', value: task ? task.date || '' : ui.tab === 'today' ? today() : '' })),
-        field('预计分钟', h('input', { name: 'minutes', type: 'number', min: 1, max: 1440, value: task ? task.minutes : 30 }))),
+        field('预计分钟', h('input', { name: 'minutes', type: 'number', min: 1, max: 1440, value: task ? task.minutes : 30, disabled: !!(task && task.steps) }))),
       field('分区', spaceSelect(task ? task.spaceId : ui.space)),
+      task && task.steps ? h('div', { class: 'field' }, h('span', {}, '分段（计时会按这个顺序进行）'),
+        h('ol', { class: 'steps boxed' }, task.steps.map((s) => h('li', { class: s.done ? 'done' : '' }, h('span', {}, s.title), h('span', { class: 'sub' }, s.minutes + ' 分钟' + (s.done ? ' · 完成' : '')))))) : null,
     ], [
-      task ? h('button', { type: 'button', class: 'btn danger', onclick: () => { if (confirm('删除这个任务？')) { change((s) => { s.tasks = s.tasks.filter((x) => x.id !== task.id); }); closeDialog(); } } }, '删除') : null,
+      task ? h('button', { type: 'button', class: 'btn danger', onclick: () => { if (confirm('删除这个任务？')) { change((s) => { s.tasks = s.tasks.filter((x) => x.id !== task.id); if (s.timer && s.timer.taskId === task.id) s.timer = null; }); closeDialog(); } } }, '删除') : null,
       h('span', { class: 'grow' }), cancelButton(),
       h('button', { class: 'btn dark', onclick: () => {
         const title = form.title.value.trim();
@@ -413,18 +673,17 @@
 
   function openMemoryDialog() {
     const form = openDialog('长期记忆', [
-      h('p', { class: 'sub' }, '助手每次回答前都会读这些内容。你可以自己添加，也可以删除助手记下的内容。'),
+      h('p', { class: 'sub' }, '助手每次回答前都会读这些内容。它在聊天中学到的事会自动记在这里，你可以随时删除或自己添加。'),
       state.memory.length ? h('ul', { class: 'memory' }, state.memory.map((m) => h('li', {},
-        h('span', {}, m.text),
-        h('button', { type: 'button', class: 'icon-btn', 'aria-label': '删除这条记忆', onclick: () => { change((s) => { s.memory = s.memory.filter((x) => x.id !== m.id); }); openMemoryDialog(); } }, icon('trash'))))) : h('p', { class: 'empty' }, '还没有记忆。例如：「我早上效率最高」「周三晚上有课」。'),
+        h('span', {}, m.text, h('span', { class: 'sub' }, m.source === 'user' ? ' · 你添加的' : ' · 助手记下的')),
+        h('button', { type: 'button', class: 'icon-btn small', 'aria-label': '删除这条记忆', onclick: () => { change((s) => { s.memory = s.memory.filter((x) => x.id !== m.id); }); openMemoryDialog(); } }, icon('trash'))))) : h('p', { class: 'empty' }, '还没有记忆。例如：「我早上效率最高」「周三晚上有课」。'),
       field('添加一条', h('input', { name: 'text', maxLength: 300, placeholder: '写一条希望助手长期记住的事' })),
     ], [
       h('span', { class: 'grow' }),
       h('button', { type: 'button', class: 'btn ghost', onclick: closeDialog }, '关闭'),
       h('button', { class: 'btn dark', onclick: () => {
-        const text = form.text.value.trim();
-        if (!text) return;
-        change((s) => s.memory.push({ id: C.uid('m'), text, at: Date.now(), source: 'user' }));
+        if (!form.text.value.trim()) return;
+        change((s) => C.addMemory(s, form.text.value, Date.now(), 'user'));
         openMemoryDialog();
       } }, '添加'),
     ]);
@@ -433,6 +692,7 @@
 
   function openSettingsDialog() {
     const a = state.settings.agent;
+    const prefs = state.settings.prefs;
     const baseField = field('接口地址（OpenAI 兼容）', h('input', { name: 'baseUrl', value: a.baseUrl, placeholder: '例如 https://api.deepseek.com' }));
     const provider = h('select', { name: 'provider', onchange: () => { baseField.hidden = provider.value === 'anthropic'; } },
       h('option', { value: 'openai', selected: a.provider !== 'anthropic' }, 'OpenAI 兼容接口（DeepSeek、OpenAI、本机模型等）'),
@@ -452,24 +712,36 @@
       field('服务商', provider), baseField,
       field('模型名称', h('input', { name: 'modelId', value: a.modelId, placeholder: '填写服务商提供的模型名称' })),
       field('API 密钥', h('input', { name: 'key', type: 'password', autocomplete: 'off', placeholder: platform.loadSecret() ? '已保存，留空表示不修改' : '只保存在这台电脑上' })),
-      h('p', { class: 'sub' }, platform.name === 'desktop' ? '密钥由 Windows 当前账户加密保存。' : '浏览器预览模式：密钥保存在这个浏览器里。正式使用请用 Windows 桌面版。'),
-      h('p', { class: 'sub' }, '发送消息时，你的任务、习惯、长期记忆和最近的对话会发给这个模型服务。'),
+      h('p', { class: 'sub' }, platform.name === 'desktop' ? '密钥由 Windows 当前账户加密保存。' : '浏览器预览模式：密钥保存在这个浏览器里。'),
+      h('p', { class: 'sub' }, '发送消息时，你的任务、习惯、计时统计、长期记忆、最近的对话，以及你附上的文件里的文字，会发给这个模型服务。'),
+      h('h3', {}, '我的节奏'),
+      h('div', { class: 'row' },
+        field('一段专注（分钟）', h('input', { name: 'segment', type: 'number', min: 5, max: 90, value: prefs.segment })),
+        field('每天可安排（分钟）', h('input', { name: 'daily', type: 'number', min: 0, max: 960, value: prefs.dailyMinutes || '' }))),
       h('h3', {}, '数据'),
       h('div', { class: 'row' },
-        h('button', { type: 'button', class: 'btn outline', onclick: () => {
+        h('button', { type: 'button', class: 'btn outline slim', onclick: () => {
           const link = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' })), download: 'tplan-' + today() + '.json' });
           link.click();
           URL.revokeObjectURL(link.href);
         } }, '导出 JSON'),
-        h('button', { type: 'button', class: 'btn outline', onclick: () => importInput.click() }, '导入 JSON'), importInput,
-        h('button', { type: 'button', class: 'btn ghost', onclick: () => { if (confirm('清空全部对话？任务和记忆会保留。')) { change((s) => { s.messages = []; }); toast('对话已清空'); } } }, '清空对话')),
+        h('button', { type: 'button', class: 'btn outline slim', onclick: () => importInput.click() }, '导入 JSON'), importInput,
+        h('button', { type: 'button', class: 'btn ghost', onclick: () => { if (confirm('清空全部对话？任务、记录和记忆会保留。')) { change((s) => { s.messages = []; }); toast('对话已清空'); } } }, '清空对话')),
     ], [
       h('span', { class: 'grow' }), cancelButton(),
       h('button', { class: 'btn dark', onclick: () => {
         const baseUrl = form.baseUrl.value.trim();
+        const segment = Math.round(Number(form.segment.value));
+        const daily = Math.round(Number(form.daily.value));
         if (provider.value === 'openai' && baseUrl && !/^https:\/\/|^http:\/\/(localhost|127\.0\.0\.1)/.test(baseUrl)) return toast('接口地址需要 https，本机模型可以用 http://localhost');
+        if (!(segment >= 5 && segment <= 90)) return toast('一段专注请填 5–90 分钟');
         try { if (form.key.value) platform.saveSecret(form.key.value); } catch (error) { return toast('密钥没有保存：' + error.message); }
-        if (change((s) => { s.settings.agent = { provider: provider.value, baseUrl, modelId: form.modelId.value.trim() }; })) { closeDialog(); toast('设置已保存'); }
+        const ok = change((s) => {
+          s.settings.agent = { provider: provider.value, baseUrl, modelId: form.modelId.value.trim() };
+          s.settings.prefs.segment = segment;
+          s.settings.prefs.dailyMinutes = daily > 0 ? daily : null;
+        });
+        if (ok) { closeDialog(); toast('设置已保存'); }
       } }, '保存'),
     ]);
   }
@@ -480,10 +752,27 @@
     renderRail();
     renderList();
     if (ui.view === 'chat') renderChat(); else renderReview();
+    renderDock();
   }
   document.querySelectorAll('.top-nav .pill').forEach((b) => b.addEventListener('click', () => { ui.view = b.dataset.view; render(); }));
   $('#openSettings').append(icon('gear'));
   $('#openSettings').addEventListener('click', openSettingsDialog);
   $('#dialog').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeDialog(); });
-  render();
+
+  /* Files can be dropped anywhere in the window. */
+  let dragDepth = 0;
+  const hasFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+  window.addEventListener('dragenter', (e) => { if (hasFiles(e)) { dragDepth++; document.body.classList.add('dragging'); } });
+  window.addEventListener('dragleave', (e) => { if (hasFiles(e) && --dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); } });
+  window.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+  window.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth = 0;
+    document.body.classList.remove('dragging');
+    addFiles(e.dataTransfer.files);
+  });
+
+  if (!state.messages.length && !state.settings.prefs.onboarded) change((s) => askOnboarding(s, 0));
+  else render();
 })();

@@ -16,6 +16,9 @@
     saveState: (json) => localStorage.setItem(STATE_KEY, json),
     loadSecret: () => localStorage.getItem(SECRET_KEY) || '',
     saveSecret: (value) => (value ? localStorage.setItem(SECRET_KEY, value) : localStorage.removeItem(SECRET_KEY)),
+    /* A web page cannot open files by path. The Windows shell provides this; here the user drags files in. */
+    readPath: async () => { throw new Error('浏览器预览版不能按路径读取本地文件。请用户把文件拖进聊天框。'); },
+    listDir: async () => { throw new Error('浏览器预览版不能列出本地文件夹。请用户把文件拖进聊天框。'); },
     async chat(agent, system, user) {
       const anthropic = agent.provider === 'anthropic';
       const url = anthropic ? 'https://api.anthropic.com/v1/messages' : agent.baseUrl.replace(/\/+$/, '') + '/chat/completions';
@@ -56,7 +59,7 @@
     const pending = new Map();
     webview.addEventListener('message', (event) => {
       const m = event.data;
-      if (!m || m.kind !== 'ai-response') return;
+      if (!m || (m.kind !== 'ai-response' && m.kind !== 'fs-response')) return;
       const p = pending.get(m.id);
       if (!p) return;
       clearTimeout(p.timer);
@@ -64,24 +67,28 @@
       if (m.error) p.reject(new Error(m.error));
       else p.resolve(m.text);
     });
+    /* Sends a request to the shell and waits for the reply with the same id. */
+    function request(message, timeoutMs, cancelKind) {
+      const id = 'rq_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          if (cancelKind) webview.postMessage({ kind: cancelKind, id });
+          reject(new Error('请求超时，请重试。'));
+        }, timeoutMs);
+        pending.set(id, { resolve, reject, timer });
+        webview.postMessage({ ...message, id });
+      });
+    }
     return {
       name: 'desktop',
+      readPath: (path) => request({ kind: 'fs-request', op: 'read', path }, 15000),
+      listDir: (path) => request({ kind: 'fs-request', op: 'list', path }, 15000),
       loadState: () => db.Read(SHELL_KEY),
       saveState: (json) => db.Write(SHELL_KEY, json),
       loadSecret: () => db.ReadSecret(),
       saveSecret: (value) => db.WriteSecret(value || ''),
-      chat(agent, system, user) {
-        const id = 'ai_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-        return new Promise((resolve, reject) => {
-          const timer = setTimeout(() => {
-            pending.delete(id);
-            webview.postMessage({ kind: 'ai-cancel', id });
-            reject(new Error('请求超时，请检查模型服务后重试。'));
-          }, TIMEOUT_MS);
-          pending.set(id, { resolve, reject, timer });
-          webview.postMessage({ kind: 'ai-request', id, system, user });
-        });
-      },
+      chat: (agent, system, user) => request({ kind: 'ai-request', system, user }, TIMEOUT_MS, 'ai-cancel'),
     };
   }
 
