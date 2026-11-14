@@ -609,6 +609,8 @@
         button(last ? '完成' : '下一段', 'dark', finishCurrentStep, 'check'),
         button('+5 分', 'ghost', () => commit(C.extendTimer(state, 5))),
         button('结束', 'ghost', () => { if (pip) pip.close(); commit(C.stopTimer(state, Date.now())); })));
+    // A running timer must stay visible: if the task column is closed and there is no floating window, open the column.
+    if (!pip && state.settings.prefs.listWidth === 0) showListWidth(LIST.min);
     if (pip) { pip.document.body.replaceChildren(content); inPage.hidden = true; inPage.replaceChildren(); }
     else { inPage.replaceChildren(content); inPage.hidden = false; }
     tick();
@@ -958,6 +960,58 @@
   $('#openSettings').append(icon('gear'));
   $('#openSettings').addEventListener('click', () => openSettingsDialog());
   $('#dialog').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeDialog(); });
+
+  /* The task column can be dragged wider or narrower. Dragging it very narrow closes it; double-click restores the default. */
+  const LIST = { min: 220, max: 640, standard: 320, closeBelow: 150 };
+  const shell = $('#shell');
+  const splitter = $('#splitter');
+  function showListWidth(width) {
+    shell.style.setProperty('--list-w', width + 'px');
+    shell.classList.toggle('list-closed', width === 0);
+    splitter.setAttribute('aria-valuenow', String(width));
+  }
+  function fitListWidth(raw) {
+    if (raw < LIST.closeBelow) return 0;
+    return Math.round(Math.min(LIST.max, Math.max(LIST.min, raw), shell.clientWidth - 96 - 420));
+  }
+  const saveListWidth = (width) => { if (width !== state.settings.prefs.listWidth) change((s) => { s.settings.prefs.listWidth = width; }); };
+  splitter.setAttribute('aria-valuemin', '0');
+  splitter.setAttribute('aria-valuemax', String(LIST.max));
+  splitter.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    splitter.setPointerCapture(e.pointerId);
+    const left = $('.list-col').getBoundingClientRect().left;
+    let width = state.settings.prefs.listWidth;
+    const move = (ev) => { width = fitListWidth(ev.clientX - left); showListWidth(width); };
+    const stop = () => {
+      splitter.removeEventListener('pointermove', move);
+      splitter.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      saveListWidth(width);
+    };
+    splitter.classList.add('dragging');
+    document.body.classList.add('resizing');
+    splitter.addEventListener('pointermove', move);
+    splitter.addEventListener('pointerup', stop, { once: true });
+    splitter.addEventListener('pointercancel', stop, { once: true });
+  });
+  splitter.addEventListener('dblclick', () => { showListWidth(LIST.standard); saveListWidth(LIST.standard); });
+  splitter.addEventListener('keydown', (e) => {
+    const step = e.shiftKey ? 60 : 20;
+    const current = state.settings.prefs.listWidth;
+    let next = null;
+    if (e.key === 'ArrowLeft') next = current <= LIST.min ? 0 : fitListWidth(current - step);
+    else if (e.key === 'ArrowRight') next = current === 0 ? LIST.min : fitListWidth(current + step);
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = fitListWidth(LIST.max);
+    else if (e.key === 'Enter') next = current === 0 ? LIST.standard : 0;
+    if (next === null) return;
+    e.preventDefault();
+    showListWidth(next);
+    saveListWidth(next);
+    splitter.focus();
+  });
+  showListWidth(Number.isFinite(state.settings.prefs.listWidth) ? state.settings.prefs.listWidth : LIST.standard);
 
   /* Files can be dropped anywhere in the window. */
   let dragDepth = 0;
