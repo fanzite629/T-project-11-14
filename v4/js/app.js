@@ -17,7 +17,7 @@
     const key = platform.loadKey(state.settings.agent.provider, state.settings.agent.provider);
     if (key) platform.saveKey(state.settings.agent.provider, key, state.settings.agent.provider);
   } catch { /* keys stay as they were */ }
-  const ui = { view: 'chat', space: null, tab: 'today', busy: false, busyText: '', draft: '', attachments: [], parsing: 0 };
+  const ui = { panelSection: 'review', space: null, tab: 'today', busy: false, busyText: '', draft: '', attachments: [], parsing: 0 };
   const library = new Map(); // files read during this session, by name; kept out of saved state because they are large
   let pip = null; // floating timer window, when open
   let dueNotified = null;
@@ -81,6 +81,10 @@
     close: 'M6 6l12 12M18 6L6 18',
     pop: 'M14 4h6v6M20 4l-8 8M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
     file: 'M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7Zm0 0v4h4',
+    bars: 'M5 19v-8M12 19V5M19 19v-5',
+    chip: 'M8 8h8v8H8zM4 10h4M4 14h4M16 10h4M16 14h4M10 4v4M14 4v4M10 16v4M14 16v4',
+    note: 'M7 4h10a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm2 5h6M9 13h6',
+    data: 'M5 7c0-1.700 3.100-3 7-3s7 1.300 7 3-3.100 3-7 3-7-1.300-7-3Zm0 0v10c0 1.700 3.100 3 7 3s7-1.300 7-3V7M5 12c0 1.700 3.100 3 7 3s7-1.300 7-3',
     minus: 'M6 12h12',
     up: 'M6 14l6-6 6 6',
     shrink: 'M5 19h14',
@@ -556,13 +560,17 @@
     });
     const picker = h('input', { type: 'file', multiple: true, hidden: true, onchange: (e) => { addFiles(e.target.files); e.target.value = ''; } });
     const main = $('#main');
+    const hour = new Date().getHours();
+    const greeting = (hour < 5 ? '夜深了' : hour < 11 ? '早上好' : hour < 13 ? '中午好' : hour < 18 ? '下午好' : '晚上好') + (state.settings.prefs.name ? '，' + state.settings.prefs.name : '');
+    const empty = !state.messages.length && !ui.busy;
+    main.classList.toggle('home', empty);
     main.replaceChildren(
       h('header', { class: 'main-head' },
         h('div', {}, h('h2', {}, '规划助手'), h('p', { class: 'sub' }, model ? '模型：' + model : '本地模式 · 还没有连接 AI 模型')),
         h('div', { class: 'head-actions' },
-          h('button', { class: 'pill soft', onclick: openMemoryDialog }, icon('brain'), h('span', {}, '记忆 ' + state.memory.length + ' 条')),
-          !model ? h('button', { class: 'pill soft', onclick: () => openSettingsDialog() }, icon('plus'), h('span', {}, '连接模型')) : null)),
-      scroller,
+          h('button', { class: 'pill soft', onclick: () => openSettings('memory') }, icon('note'), h('span', {}, '记忆 ' + state.memory.length + ' 条')),
+          !model ? h('button', { class: 'pill soft', onclick: () => openSettings('model') }, icon('plus'), h('span', {}, '连接模型')) : null)),
+      empty ? h('div', { class: 'greeting' }, h('span', { class: 'brand-mark', 'aria-hidden': 'true' }, 'T'), h('h1', {}, greeting)) : scroller,
       h('div', { class: 'composer' },
         ui.attachments.length || ui.parsing ? h('div', { class: 'files' },
           ui.attachments.map((f) => fileChip(f, () => { ui.attachments = ui.attachments.filter((x) => x !== f); render(); })),
@@ -572,6 +580,7 @@
           h('button', { class: 'icon-btn small', 'aria-label': '添加文件', title: '添加课件、图片或代码文件', onclick: () => picker.click() }, icon('clip')), picker,
           h('span', { class: 'sub grow' }, ui.space ? '当前分区：' + space(ui.space).name : '助手只会提议，你确认后才写入'),
           h('button', { class: 'send', id: 'send', 'aria-label': '发送', onclick: () => send() }, icon('send')))),
+      empty ? h('div', { class: 'starters' }, STARTERS.map((text) => h('button', { class: 'pill option', onclick: () => send(text) }, text))) : null,
       h('div', { class: 'drop-hint' }, icon('file'), '松开，把文件交给助手'));
     updateSend();
     scroller.scrollTop = previous && chatKey === lastChatKey ? offset : scroller.scrollHeight;
@@ -587,7 +596,6 @@
   async function addFiles(fileList) {
     const files = [...fileList].slice(0, 6);
     if (!files.length) return;
-    if (ui.view !== 'chat') ui.view = 'chat';
     ui.parsing += files.length;
     render();
     for (const file of files) {
@@ -715,7 +723,6 @@
         options: [['太简单', 'easy'], ['正好', 'ok'], ['太难', 'hard']].map(([label, value]) => ({ label, feel: { taskId: task.id, value } })),
       });
       if (pip) pip.close();
-      ui.view = 'chat';
     }
     commit(result.state);
   }
@@ -835,7 +842,7 @@
     });
     return box;
   }
-  function renderReview() {
+  function reviewContent() {
     const t = today();
     const start = C.weekStart(t);
     const days = Array.from({ length: 7 }, (_, i) => C.addDays(start, i));
@@ -845,16 +852,15 @@
     const doneWeek = state.tasks.filter((x) => x.done && x.doneAt && days.includes(C.todayISO(new Date(x.doneAt))));
     const planned = state.tasks.filter((x) => x.date && x.date >= start && x.date <= days[6]);
     const stat = (value, label) => h('div', { class: 'stat' }, h('strong', {}, value), h('span', { class: 'sub' }, label));
-    $('#main').replaceChildren(
-      h('header', { class: 'main-head' }, h('div', {}, h('h2', {}, '本周回看'), h('p', { class: 'sub' }, plainDate(days[0]) + ' 至 ' + plainDate(days[6]) + ' · 只显示已记录的事实'))),
-      h('div', { class: 'review-scroll' },
+    return h('div', { class: 'review-body' },
+        h('p', { class: 'sub' }, plainDate(days[0]) + ' 至 ' + plainDate(days[6]) + ' · 只显示已记录的事实'),
         h('div', { class: 'stats' },
           stat(minutesLabel(perDay.reduce((a, b) => a + b, 0)), '本周计时的专注时间'),
           stat(String(sessions.length), '完成的计时段数'),
           stat(planned.filter((x) => x.done).length + ' / ' + planned.length, '本周安排的完成情况')),
         h('section', { class: 'card' }, h('h3', {}, '助手对你的了解'),
           h('ul', { class: 'plain' }, profileLines().map((line) => h('li', {}, line))),
-          h('div', { class: 'row' }, h('button', { class: 'pill soft', onclick: openMemoryDialog }, icon('brain'), '查看和修改长期记忆（' + state.memory.length + ' 条）'))),
+          h('div', { class: 'row' }, h('button', { class: 'pill soft', onclick: () => openSettings('memory') }, icon('note'), '查看和修改长期记忆（' + state.memory.length + ' 条）'))),
         h('section', { class: 'card' },
           h('div', { class: 'card-head' }, h('h3', {}, '反思'), h('button', { class: 'pill soft', onclick: () => openReflectionDialog(null) }, icon('plus'), '写一条')),
           state.reflections.length ? h('div', { class: 'reflections' }, [...state.reflections].reverse().slice(0, 30).map((r) => h('article', { class: 'reflection' },
@@ -871,7 +877,7 @@
             h('span', { class: 'cells' }, days.map((d) => h('span', { class: 'cell' + (habit.log[d] ? ' on' : ''), title: dateLabel(d) }))),
             h('span', { class: 'sub' }, C.habitWeekCount(habit, t) + ' / ' + habit.perWeek)))) : h('p', { class: 'empty' }, '还没有习惯。')),
         h('section', { class: 'card' }, h('h3', {}, '本周完成'),
-          doneWeek.length ? h('ul', { class: 'plain' }, doneWeek.map((x) => h('li', {}, x.title, h('span', { class: 'sub' }, ' · ' + minutesLabel(x.minutes))))) : h('p', { class: 'empty' }, '本周还没有完成的任务。'))));
+          doneWeek.length ? h('ul', { class: 'plain' }, doneWeek.map((x) => h('li', {}, x.title, h('span', { class: 'sub' }, ' · ' + minutesLabel(x.minutes))))) : h('p', { class: 'empty' }, '本周还没有完成的任务。')));
   }
 
   /* ---------- dialogs ---------- */
@@ -971,25 +977,6 @@
     form.name.focus();
   }
 
-  function openMemoryDialog() {
-    const form = openDialog('长期记忆', [
-      h('p', { class: 'sub' }, '助手每次回答前都会读这些内容。它在聊天中学到的事会自动记在这里，你可以随时删除或自己添加。'),
-      state.memory.length ? h('ul', { class: 'memory' }, state.memory.map((m) => h('li', {},
-        h('span', {}, m.text, h('span', { class: 'sub' }, m.source === 'user' ? ' · 你添加的' : ' · 助手记下的')),
-        h('button', { type: 'button', class: 'icon-btn small', 'aria-label': '删除这条记忆', onclick: () => { change((s) => { s.memory = s.memory.filter((x) => x.id !== m.id); }); openMemoryDialog(); } }, icon('trash'))))) : h('p', { class: 'empty' }, '还没有记忆。例如：「我早上效率最高」「周三晚上有课」。'),
-      field('添加一条', h('input', { name: 'text', maxLength: 300, placeholder: '写一条希望助手长期记住的事' })),
-    ], [
-      h('span', { class: 'grow' }),
-      h('button', { type: 'button', class: 'btn ghost', onclick: closeDialog }, '关闭'),
-      h('button', { class: 'btn dark', onclick: () => {
-        if (!form.text.value.trim()) return;
-        change((s) => C.addMemory(s, form.text.value, Date.now(), 'user'));
-        openMemoryDialog();
-      } }, '添加'),
-    ]);
-    form.text.focus();
-  }
-
   function openReflectionDialog(current) {
     const form = openDialog(current ? '修改反思' : '写一条反思', [
       field('日期', h('input', { name: 'date', type: 'date', value: current ? current.date : today() })),
@@ -1024,9 +1011,9 @@
 
   /* Settings work on a draft. Choosing a provider fills in its address; pasting a key loads its models. */
   function openSettingsDialog(draft) {
-    const d = draft && draft.provider ? draft : { ...state.settings.agent, key: '', status: [], busy: '', manual: false };
+    const d = draft && draft.provider ? draft : { ...state.settings.agent, key: '', status: [], busy: '', manual: false, name: state.settings.prefs.name || '', segment: state.settings.prefs.segment, daily: state.settings.prefs.dailyMinutes || '' };
+    panelDraft = d;
     const preset = Providers.find(d.provider);
-    const prefs = state.settings.prefs;
     const savedKey = platform.loadKey(d.provider);
     const key = () => d.key || savedKey;
     const again = () => openSettingsDialog(d);
@@ -1064,7 +1051,7 @@
         const next = C.normalize(JSON.parse(await file.text()));
         next.settings.agent = Providers.migrate(next.settings.agent);
         if (!confirm('导入会替换现在的全部数据（' + next.tasks.length + ' 个任务，' + next.habits.length + ' 个习惯）。继续吗？')) return;
-        if (commit(next)) { closeDialog(); toast('已导入'); }
+        if (commit(next)) { closePanel(); toast('已导入'); }
       } catch (error) { toast('导入失败：' + error.message); }
     } });
     const useList = d.models.length && !d.manual;
@@ -1072,71 +1059,115 @@
       ? h('select', { name: 'modelId', onchange: (e) => { d.modelId = e.target.value; d.vision = null; } },
         (d.models.includes(d.modelId) || !d.modelId ? d.models : [d.modelId, ...d.models]).map((id) => h('option', { value: id, selected: id === d.modelId }, id)))
       : h('input', { name: 'modelId', value: d.modelId, placeholder: '填写模型名称，或者先读取模型列表', oninput: (e) => { d.modelId = e.target.value.trim(); d.vision = null; } });
-    const form = openDialog('设置', [
-      h('h3', {}, 'AI 模型'),
-      field('服务商', h('select', { name: 'provider', onchange: (e) => {
-        Object.assign(d, { provider: e.target.value, baseUrl: Providers.find(e.target.value).baseUrl, modelId: '', models: [], vision: null, key: '', status: [], manual: false });
-        again();
-      } }, Providers.PROVIDERS.map((p) => h('option', { value: p.id, selected: p.id === d.provider }, p.name)))),
-      preset.note ? h('p', { class: 'sub' }, preset.note) : null,
-      field('API 密钥', h('input', {
-        name: 'key', type: 'password', autocomplete: 'off', value: d.key, placeholder: savedKey ? '已保存，留空表示不修改' : '粘贴密钥后会自动读取模型',
-        oninput: (e) => { d.key = e.target.value.trim(); },
-        onpaste: () => setTimeout(() => { if (d.key && d.baseUrl) loadModels(); }, 0),
-      })),
-      h('div', { class: 'field' }, h('span', {}, '模型'),
-        h('div', { class: 'row tight' }, modelControl,
-          h('button', { type: 'button', class: 'btn outline slim', disabled: !!d.busy, onclick: loadModels }, '读取模型'),
-          d.models.length ? h('button', { type: 'button', class: 'btn ghost', onclick: () => { d.manual = !d.manual; again(); } }, d.manual ? '从列表选' : '手动填写') : null)),
-      h('details', { class: 'advanced', open: d.provider === 'custom' }, h('summary', {}, '接口地址'),
-        h('input', { name: 'baseUrl', value: d.baseUrl, placeholder: 'https://…/v1', 'aria-label': '接口地址', oninput: (e) => { d.baseUrl = e.target.value.trim(); } })),
-      h('div', { class: 'row tight' },
-        h('button', { type: 'button', class: 'btn outline slim', disabled: !!d.busy, onclick: testConnection }, '测试连接'),
-        d.busy ? h('span', { class: 'sub', role: 'status' }, d.busy) : d.vision === true ? h('span', { class: 'sub' }, '可以识图') : d.vision === false ? h('span', { class: 'sub' }, '不能识图') : null),
-      d.status.length ? h('ul', { class: 'status', role: 'status' }, d.status.map(([kind, text]) => h('li', { class: kind }, text))) : null,
-      h('p', { class: 'sub' }, (platform.name === 'desktop' ? '密钥由 Windows 当前账户加密保存。' : '密钥只保存在这个浏览器里，每个服务商分开保存。') + '发送消息时，你的任务、习惯、计时统计、长期记忆、最近的对话，以及附上的文件和图片，会发给这个模型服务。'),
-      h('h3', {}, '我的节奏'),
-      h('div', { class: 'row' },
-        field('一段专注（分钟）', h('input', { name: 'segment', type: 'number', min: 5, max: 90, value: prefs.segment })),
-        field('每天可安排（分钟）', h('input', { name: 'daily', type: 'number', min: 0, max: 960, value: prefs.dailyMinutes || '' }))),
-      h('h3', {}, '数据'),
-      h('div', { class: 'row' },
-        h('button', { type: 'button', class: 'btn outline slim', onclick: () => {
-          const link = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' })), download: 'tplan-' + today() + '.json' });
-          link.click();
-          URL.revokeObjectURL(link.href);
-        } }, '导出 JSON'),
-        h('button', { type: 'button', class: 'btn outline slim', onclick: () => importInput.click() }, '导入 JSON'), importInput,
-        h('button', { type: 'button', class: 'btn ghost', onclick: () => { if (confirm('清空全部对话？任务、记录和记忆会保留。')) { change((s) => { s.messages = []; }); toast('对话已清空'); } } }, '清空对话')),
-    ], [
-      h('span', { class: 'grow' }), cancelButton(),
-      h('button', { class: 'btn dark', onclick: () => {
-        const segment = Math.round(Number(form.segment.value));
-        const daily = Math.round(Number(form.daily.value));
-        if (!(segment >= 5 && segment <= 90)) return toast('一段专注请填 5–90 分钟');
-        if (d.modelId) { try { Providers.chatRequest(d, 'x', '', ''); } catch (error) { return toast(error.message); } }
-        try { if (d.key) platform.saveKey(d.provider, d.key); } catch (error) { return toast('密钥没有保存：' + error.message); }
-        const ok = change((s) => {
-          s.settings.agent = { provider: d.provider, baseUrl: d.baseUrl, modelId: d.modelId, models: d.models, vision: d.vision };
-          s.settings.prefs.segment = segment;
-          s.settings.prefs.dailyMinutes = daily > 0 ? daily : null;
-        });
-        if (ok) { closeDialog(); toast('设置已保存'); }
-      } }, '保存'),
-    ]);
+    const save = () => {
+      const segment = Math.round(Number(d.segment));
+      const daily = Math.round(Number(d.daily));
+      if (!(segment >= 5 && segment <= 90)) return toast('一段专注请填 5–90 分钟');
+      if (d.modelId) { try { Providers.chatRequest(d, 'x', '', ''); } catch (error) { return toast(error.message); } }
+      try { if (d.key) platform.saveKey(d.provider, d.key); } catch (error) { return toast('密钥没有保存：' + error.message); }
+      const ok = change((s) => {
+        s.settings.agent = { provider: d.provider, baseUrl: d.baseUrl, modelId: d.modelId, models: d.models, vision: d.vision };
+        Object.assign(s.settings.prefs, { segment, dailyMinutes: daily > 0 ? daily : null, name: String(d.name).trim().slice(0, 20) });
+      });
+      if (ok) { d.key = ''; toast('设置已保存'); }
+    };
+    const saveRow = () => h('div', { class: 'dialog-actions' }, h('span', { class: 'grow' }), h('button', { type: 'button', class: 'btn dark', onclick: save }, '保存'));
+    const sections = {
+      review: ['回看', 'bars', () => [reviewContent()]],
+      model: ['AI 模型', 'chip', () => [
+        field('服务商', h('select', { name: 'provider', onchange: (e) => {
+          Object.assign(d, { provider: e.target.value, baseUrl: Providers.find(e.target.value).baseUrl, modelId: '', models: [], vision: null, key: '', status: [], manual: false });
+          again();
+        } }, Providers.PROVIDERS.map((p) => h('option', { value: p.id, selected: p.id === d.provider }, p.name)))),
+        preset.note ? h('p', { class: 'sub' }, preset.note) : null,
+        field('API 密钥', h('input', {
+          name: 'key', type: 'password', autocomplete: 'off', value: d.key, placeholder: savedKey ? '已保存，留空表示不修改' : '粘贴密钥后会自动读取模型',
+          oninput: (e) => { d.key = e.target.value.trim(); },
+          onpaste: () => setTimeout(() => { if (d.key && d.baseUrl) loadModels(); }, 0),
+        })),
+        h('div', { class: 'field' }, h('span', {}, '模型'),
+          h('div', { class: 'row tight' }, modelControl,
+            h('button', { type: 'button', class: 'btn outline slim', disabled: !!d.busy, onclick: loadModels }, '读取模型'),
+            d.models.length ? h('button', { type: 'button', class: 'btn ghost', onclick: () => { d.manual = !d.manual; again(); } }, d.manual ? '从列表选' : '手动填写') : null)),
+        h('details', { class: 'advanced', open: d.provider === 'custom' }, h('summary', {}, '接口地址'),
+          h('input', { name: 'baseUrl', value: d.baseUrl, placeholder: 'https://…/v1', 'aria-label': '接口地址', oninput: (e) => { d.baseUrl = e.target.value.trim(); } })),
+        h('div', { class: 'row tight' },
+          h('button', { type: 'button', class: 'btn outline slim', disabled: !!d.busy, onclick: testConnection }, '测试连接'),
+          d.busy ? h('span', { class: 'sub', role: 'status' }, d.busy) : d.vision === true ? h('span', { class: 'sub' }, '可以识图') : d.vision === false ? h('span', { class: 'sub' }, '不能识图') : null),
+        d.status.length ? h('ul', { class: 'status', role: 'status' }, d.status.map(([kind, text]) => h('li', { class: kind }, text))) : null,
+        h('p', { class: 'sub' }, (platform.name === 'desktop' ? '密钥由 Windows 当前账户加密保存。' : '密钥只保存在这个浏览器里，每个服务商分开保存。') + '发送消息时，你的任务、习惯、计时统计、长期记忆、最近的对话，以及附上的文件和图片，会发给这个模型服务。'),
+        saveRow(),
+      ]],
+      rhythm: ['我的节奏', 'brain', () => [
+        field('怎么称呼你（显示在问候语里，也会告诉助手）', h('input', { name: 'name', maxLength: 20, value: d.name, placeholder: '可以不填', oninput: (e) => { d.name = e.target.value; } })),
+        h('div', { class: 'row' },
+          field('一段专注（分钟）', h('input', { name: 'segment', type: 'number', min: 5, max: 90, value: d.segment, oninput: (e) => { d.segment = e.target.value; } })),
+          field('每天可安排（分钟）', h('input', { name: 'daily', type: 'number', min: 0, max: 960, value: d.daily, oninput: (e) => { d.daily = e.target.value; } }))),
+        h('p', { class: 'sub' }, '助手按这两个数字拆分步骤和安排每天的任务量。计时记录多了以后，它会参考你的真实速度。'),
+        saveRow(),
+      ]],
+      memory: ['记忆', 'note', () => {
+        const input = h('input', { name: 'memory', maxLength: 300, placeholder: '写一条希望助手长期记住的事', 'aria-label': '添加一条记忆',
+          onkeydown: (e) => { if (e.key === 'Enter' && !e.isComposing) add(); } });
+        const add = () => { if (input.value.trim()) change((s) => C.addMemory(s, input.value, Date.now(), 'user')); };
+        return [
+          h('p', { class: 'sub' }, '助手每次回答前都会读这些内容。它在聊天中学到的事会自动记在这里，你可以随时删除或自己添加。'),
+          state.memory.length ? h('ul', { class: 'memory' }, state.memory.map((m) => h('li', {},
+            h('span', {}, m.text, h('span', { class: 'sub' }, m.source === 'user' ? ' · 你添加的' : ' · 助手记下的')),
+            h('button', { type: 'button', class: 'icon-btn small', 'aria-label': '删除这条记忆', onclick: () => change((s) => { s.memory = s.memory.filter((x) => x.id !== m.id); }) }, icon('trash')))))
+            : h('p', { class: 'empty' }, '还没有记忆。例如：「我早上效率最高」「周三晚上有课」。'),
+          h('div', { class: 'row tight' }, input, h('button', { type: 'button', class: 'btn dark', onclick: add }, '添加')),
+        ];
+      }],
+      data: ['数据', 'data', () => [
+        h('p', { class: 'sub' }, '数据保存在' + (platform.name === 'desktop' ? '这台电脑的数据库里' : '这个浏览器里') + '。换电脑或清理浏览器之前，请先导出。'),
+        h('div', { class: 'row' },
+          h('button', { type: 'button', class: 'btn outline slim', onclick: () => {
+            const link = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' })), download: 'tplan-' + today() + '.json' });
+            link.click();
+            URL.revokeObjectURL(link.href);
+          } }, '导出 JSON'),
+          h('button', { type: 'button', class: 'btn outline slim', onclick: () => importInput.click() }, '导入 JSON'), importInput),
+        h('div', { class: 'row' },
+          h('button', { type: 'button', class: 'btn ghost', onclick: () => { if (confirm('清空全部对话？任务、记录和记忆会保留。')) { change((s) => { s.messages = []; }); toast('对话已清空'); } } }, '清空对话')),
+      ]],
+    };
+    if (!sections[ui.panelSection]) ui.panelSection = 'review';
+    const [title, , body] = sections[ui.panelSection];
+    const panel = $('#panel');
+    const previous = panel.querySelector('.panel-content');
+    const keep = previous && previous.dataset.section === ui.panelSection ? previous.scrollTop : 0;
+    const content = h('div', { class: 'panel-content', 'data-section': ui.panelSection }, h('h3', { class: 'panel-title' }, title), body());
+    panel.replaceChildren(
+      h('header', { class: 'panel-head' }, h('h2', {}, '设置'), h('button', { class: 'icon-btn small', 'aria-label': '关闭', onclick: closePanel }, icon('close'))),
+      h('div', { class: 'panel-body' },
+        h('nav', { class: 'panel-nav', 'aria-label': '设置分类' }, Object.entries(sections).map(([id, [label, glyph]]) =>
+          h('button', { class: id === ui.panelSection ? 'on' : '', 'aria-current': id === ui.panelSection ? 'page' : null, onclick: () => { ui.panelSection = id; again(); } }, icon(glyph), label))),
+        content));
+    if (!panel.open) panel.showModal();
+    content.scrollTop = keep;
+  }
+  let panelDraft = null;
+  function openSettings(section) {
+    if (section) ui.panelSection = section;
+    openSettingsDialog(panelDraft);
+  }
+  function closePanel() {
+    panelDraft = null;
+    $('#panel').close();
   }
 
   /* ---------- shell ---------- */
   function render() {
-    document.querySelectorAll('.top-nav .pill').forEach((b) => b.classList.toggle('on', b.dataset.view === ui.view));
     renderRail();
     renderList();
-    if (ui.view === 'chat') renderChat(); else renderReview();
+    renderChat();
     renderDock();
+    if ($('#panel').open && panelDraft) openSettingsDialog(panelDraft); // keep the open settings panel in step with the data
   }
-  document.querySelectorAll('.top-nav .pill').forEach((b) => b.addEventListener('click', () => { ui.view = b.dataset.view; render(); }));
-  $('#openSettings').append(icon('gear'));
-  $('#openSettings').addEventListener('click', () => openSettingsDialog());
+  $('#openSettings').addEventListener('click', () => openSettings());
+  $('#panel').addEventListener('click', (e) => { if (e.target === e.currentTarget) closePanel(); });
+  $('#panel').addEventListener('close', () => { panelDraft = null; });
   $('#dialog').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeDialog(); });
 
   /* Space icons grow smoothly as the pointer approaches, largest under the pointer, like a dock. */

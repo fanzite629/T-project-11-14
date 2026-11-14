@@ -51,7 +51,7 @@
       timer: null,
       settings: {
         agent: { provider: 'deepseek', baseUrl: 'https://api.deepseek.com', modelId: '', models: [], vision: null },
-        prefs: { segment: 25, dailyMinutes: null, bestTime: null, onboarded: false, timerCompact: false, listWidth: 320 },
+        prefs: { segment: 25, dailyMinutes: null, bestTime: null, onboarded: false, timerCompact: false, listWidth: 320, name: '' },
       },
     };
   }
