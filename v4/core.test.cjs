@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const C = require('./js/core.js');
 const Agent = require('./js/agent.js');
+const Providers = require('./js/providers.js');
 
 const TODAY = '2026-11-14'; // a Saturday
 const MIN = 60000;
@@ -229,4 +230,54 @@ test('agent loop runs tools, feeds results back, and stops at the limit', async 
   const looping = await Agent.run({ context: {}, chat: async () => { calls++; return '{"tool":{"name":"get_history","args":{}}}'; }, tools: { get_history: () => ({}) } });
   assert.equal(calls, Agent.MAX_TOOL_STEPS + 1);
   assert.equal(looping.actions.length, 0);
+});
+
+test('a reflection keeps its line breaks, can be corrected, and is saved on confirm', () => {
+  let s = withProposal(C.emptyState(), [{ type: 'add_reflection', text: '今天学了定时器。\n\n\n\n卡在初值计算  上。 ', date: 'x' }]);
+  assert.equal(s.messages[0].proposal.actions[0].text, '今天学了定时器。\n\n卡在初值计算  上。');
+  s = C.editProposal(s, 'm1', 0, { kind: 'text', text: '今天学了定时器。\n卡在初值计算上。' });
+  const done = C.resolveProposal(s, 'm1', true, new Date(TODAY + 'T20:00:00').getTime());
+  assert.deepEqual([done.reflections[0].date, done.reflections[0].text], [TODAY, '今天学了定时器。\n卡在初值计算上。']);
+  assert.equal(C.buildContext(done, TODAY, 'x').recentReflections.length, 1);
+});
+
+test('agent passes pictures to the model and lists only documents as attachments', async () => {
+  const seen = [];
+  await Agent.run({
+    context: {}, attachments: [{ name: 'note.jpg', kind: '图片', text: '', image: { mediaType: 'image/jpeg', data: 'AAAA' } }, { name: 'a.txt', kind: '文本', text: 'hello' }],
+    chat: async (system, user, images) => { seen.push([JSON.parse(user), images]); return '{"reply":"ok"}'; },
+  });
+  assert.deepEqual(seen[0][0].images, ['note.jpg']);
+  assert.deepEqual(seen[0][0].attachments.map((a) => a.name), ['a.txt']);
+  assert.deepEqual(seen[0][1], [{ mediaType: 'image/jpeg', data: 'AAAA' }]);
+});
+
+test('providers: presets, old settings, and request shapes', () => {
+  assert.deepEqual(Providers.PROVIDERS.map((p) => p.id), ['deepseek', 'openai', 'anthropic', 'doubao', 'kimi', 'custom']);
+  assert.equal(Providers.migrate({ provider: 'openai', baseUrl: 'https://api.deepseek.com', modelId: 'm' }).provider, 'deepseek');
+  assert.equal(Providers.migrate({ provider: 'openai', baseUrl: 'http://localhost:11434/v1' }).provider, 'custom');
+  assert.equal(Providers.migrate({ provider: 'anthropic', baseUrl: '' }).baseUrl, 'https://api.anthropic.com');
+  assert.equal(Providers.migrate({ provider: 'kimi', baseUrl: 'https://api.moonshot.ai/v1' }).provider, 'kimi');
+
+  const deepseek = { provider: 'deepseek', baseUrl: 'https://api.deepseek.com/', modelId: 'deepseek-chat' };
+  assert.deepEqual(Providers.modelsRequest(deepseek, 'k'), { url: 'https://api.deepseek.com/models', headers: { authorization: 'Bearer k' } });
+  const plain = Providers.chatRequest(deepseek, 'k', 'sys', 'hi');
+  assert.equal(plain.url, 'https://api.deepseek.com/chat/completions');
+  assert.deepEqual(plain.body.messages, [{ role: 'system', content: 'sys' }, { role: 'user', content: 'hi' }]);
+  const image = [{ mediaType: 'image/jpeg', data: 'AAAA' }];
+  assert.deepEqual(Providers.chatRequest(deepseek, 'k', 'sys', 'hi', image).body.messages[1].content[1], { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAAA' } });
+
+  const claude = { provider: 'anthropic', baseUrl: 'https://api.anthropic.com', modelId: 'claude-opus-5-5' };
+  assert.equal(Providers.modelsRequest(claude, 'k').url, 'https://api.anthropic.com/v1/models?limit=100');
+  const call = Providers.chatRequest(claude, 'k', 'sys', 'hi', image);
+  assert.equal(call.url, 'https://api.anthropic.com/v1/messages');
+  assert.equal(call.headers['x-api-key'], 'k');
+  assert.equal(call.body.system, 'sys');
+  assert.deepEqual(call.body.messages[0].content[0], { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'AAAA' } });
+  assert.equal(Providers.parseChat(claude, { content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: 'ok' }] }), 'ok');
+  assert.equal(Providers.parseChat(deepseek, { choices: [{ message: { content: 'ok' } }] }), 'ok');
+
+  assert.deepEqual(Providers.parseModels({ data: [{ id: 'gpt-x' }, { id: 'text-embedding-3' }, { id: 'a-model' }, { id: 'gpt-x' }] }), ['a-model', 'gpt-x']);
+  assert.throws(() => Providers.chatRequest({ provider: 'custom', baseUrl: 'http://example.com', modelId: 'm' }, '', 's', 'u'));
+  assert.match(Providers.explain(401, { error: { message: 'bad key' } }), /密钥.*bad key/);
 });

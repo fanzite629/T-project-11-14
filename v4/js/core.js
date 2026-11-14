@@ -45,11 +45,12 @@
       habits: [],
       goals: [],
       sessions: [],
+      reflections: [],
       messages: [],
       memory: [],
       timer: null,
       settings: {
-        agent: { provider: 'openai', baseUrl: '', modelId: '' },
+        agent: { provider: 'deepseek', baseUrl: 'https://api.deepseek.com', modelId: '', models: [], vision: null },
         prefs: { segment: 25, dailyMinutes: null, bestTime: null, onboarded: false, timerCompact: false },
       },
     };
@@ -61,7 +62,7 @@
     if ((raw.version || 0) > VERSION) throw new Error('这是更新版本的数据，请使用新版软件打开');
     const base = emptyState();
     const s = { ...base, ...raw, version: VERSION };
-    for (const key of ['spaces', 'tasks', 'habits', 'goals', 'sessions', 'messages', 'memory']) if (!Array.isArray(s[key])) s[key] = base[key];
+    for (const key of ['spaces', 'tasks', 'habits', 'goals', 'sessions', 'reflections', 'messages', 'memory']) if (!Array.isArray(s[key])) s[key] = base[key];
     s.settings = { ...base.settings, ...(isObject(raw.settings) ? raw.settings : {}) };
     s.settings.agent = { ...base.settings.agent, ...(isObject(s.settings.agent) ? s.settings.agent : {}) };
     s.settings.prefs = { ...base.settings.prefs, ...(isObject(s.settings.prefs) ? s.settings.prefs : {}) };
@@ -186,6 +187,12 @@
         if (!milestones.length) throw new Error('目标至少需要一个阶段');
         return { type: 'add_goal', title, deadline: validDate(a.deadline) ? a.deadline : null, spaceId, milestones };
       }
+      case 'add_reflection': {
+        // Line breaks are kept: a reflection is the user's own writing, often transcribed from a photo.
+        const text = typeof a.text === 'string' ? a.text.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 4000) : '';
+        if (!text) throw new Error('反思内容为空');
+        return { type: 'add_reflection', text, date: validDate(a.date) ? a.date : null };
+      }
       case 'remember': {
         const text = cleanText(a.text, 300);
         if (!text) throw new Error('记忆内容为空');
@@ -226,6 +233,8 @@
         s.tasks.push(task);
         created.push(task.id);
       }));
+    } else if (a.type === 'add_reflection') {
+      s.reflections.push({ id: uid('r'), date: a.date || todayISO(new Date(now)), text: a.text, at: now, source: origin });
     } else if (a.type === 'remember') {
       addMemory(s, a.text, now, origin);
     }
@@ -264,6 +273,13 @@
     const message = s.messages.find((m) => m.id === messageId);
     if (!message || !message.proposal || message.proposal.status !== 'pending') throw new Error('这份提议已经处理过了');
     const a = message.proposal.actions[actionIndex];
+    if (a && a.type === 'add_reflection' && op.kind === 'text') {
+      const text = String(op.text || '').trim().slice(0, 4000);
+      if (!text) throw new Error('反思内容不能为空');
+      a.text = text;
+      message.proposal.edited = true;
+      return s;
+    }
     if (!a || a.type !== 'add_task') throw new Error('这一项不能修改');
     if (!a.steps) a.steps = [{ title: a.title, minutes: Math.min(180, a.minutes) }];
     const step = a.steps[op.step];
@@ -448,6 +464,7 @@
         title: t.title, doneOn: toDay(t.doneAt), minutes: t.minutes, space: spaceName(t.spaceId), feel: t.feel || null,
       })),
       habits: state.habits.map((h) => ({ title: h.title, targetPerWeek: h.perWeek, doneThisWeek: habitWeekCount(h, today), doneToday: !!h.log[today] })),
+      recentReflections: state.reflections.slice(-5).map((r) => ({ date: r.date, text: r.text.slice(0, 600) })),
       timerRunning: !!state.timer,
       history: state.messages.slice(-12).map((m) => ({ role: m.role, text: m.text.slice(0, 1500) })),
       message: text,

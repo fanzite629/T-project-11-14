@@ -299,3 +299,26 @@ body.dragging .drop-hint { display: flex; }
 .dock-card.compact .dock-titles { flex: 1; }
 .dock-card.compact .dock-dots { height: 4px; }
 .pip-body .dock-card.compact { justify-content: center; }
+
+/* ----- pictures, reflections, provider settings ----- */
+.file-chip.has-thumb { padding: 4px 10px 4px 4px; }
+.thumb { width: 34px; height: 34px; border-radius: 7px; object-fit: cover; flex: none; }
+.msg .thumb { width: 56px; height: 56px; }
+.reflection-edit { width: 100%; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--list); resize: vertical; line-height: 1.6; }
+.reflection-edit:focus { outline: 0; border-color: var(--ink); }
+.reflection-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+.card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.reflections { display: flex; flex-direction: column; gap: 10px; }
+.reflection { padding: 12px 14px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.reflection header { display: flex; align-items: center; gap: 8px; }
+.field textarea { padding: 9px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--list); font-size: 15px; color: var(--text); width: 100%; resize: vertical; line-height: 1.6; }
+.row.tight { flex-wrap: nowrap; align-items: center; gap: 8px; }
+.row.tight > select, .row.tight > input { flex: 1; min-width: 0; padding: 9px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--list); font-size: 15px; color: var(--text); }
+.advanced summary { cursor: pointer; font-size: 13px; color: var(--t2); }
+.advanced input { margin-top: 6px; width: 100%; padding: 9px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--list); }
+.status { list-style: none; padding: 10px 14px; margin: 0; border-radius: 12px; background: var(--list); border: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; font-size: 13.5px; overflow-wrap: anywhere; }
+.status li::before { content: "✓ "; color: var(--ok); font-weight: 700; }
+.status li.bad::before { content: "✕ "; color: var(--bad); }
+.status li.warn::before { content: "! "; color: #b7791f; }
+.status li.bad { color: var(--bad); }
+.sheet { overflow-y: auto; }
